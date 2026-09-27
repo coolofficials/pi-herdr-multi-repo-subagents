@@ -54,7 +54,7 @@ Use an optional `pi-herdr.json` at the root for unusual layouts:
 
 Paths are literal paths relative to the root, not globs. `include` replaces automatic traversal and can select nested repositories. Resolved paths must remain below the root. Optional settings: `maxDepth` (1–32), `layout` (`tabs` or `split`), `direction` (`right` or `down` for splits), `model` (`provider/model`), and `thinking`. `documents` is an exact allowlist of up to 30 relative `.md`/`.txt` task metadata files; defaults are `AGENTS.md` and `todo-tracker.md`. Code repositories, links, VCS internals and generated/dependency paths cannot be accessed through the task-document tool. Configure additional documents yourself; the Orchestrator cannot rewrite its access configuration. By default children inherit the coordinator's model and thinking level. These settings contain execution preferences, not AGENTS.md policies.
 
-## Hierarchy (v0.5.0)
+## Hierarchy (v0.6.0)
 
 ```text
 Orchestrator (requirements and overall coordination)
@@ -78,34 +78,48 @@ Role permissions are selected at session/job boundaries and checked by tool hook
 ### Completion protocol
 
 1. Orchestrator creates `repo_project` with overall requirements, then `repo_work` tasks containing a goal, acceptance criteria, repository set and verification ownership. Baselines are captured before implementation. Start a `task_lead` at `repo: "."` for each task, passing its task ID as `bundle`.
-2. Task Lead delegates to Implementers in its assigned repositories. It judges completion candidacy **from their conversations and completed reports**, not from reading code. When the coherent task is ready, it explicitly calls `repo_work candidate`.
-3. Only after candidacy may the Lead launch/prompt a `reviewer` at `repo: "."` for that task. Reviewer inspects actual changes and evidence. Findings go to the Lead, which batches remediation through Implementers and requests re-review when ready. There is no review after every individual edit.
-4. `repo_work complete` is Task Lead-only and requires a settled, current Reviewer PASS. A Lead's `repo_agent_report outcome=completed` is also gated and checked again when its turn settles. Blockers/incomplete reports may be sent without approval; interim waiting turns need no final report.
-5. After all required Leads have delivered approved completion reports, Orchestrator calls `repo_project candidate`, then starts/prompts `oracle` at `repo: "."`, passing the project ID as `bundle`.
-6. Oracle evaluates overall acceptance and actual integration boundaries, using task approval evidence. Findings return to Orchestrator, which revises/reopens affected tasks and resumes their Leads. Only `repo_project complete` with a current Oracle PASS authorizes overall completion.
+2. Task Lead delegates to Implementers in its assigned repositories. It judges readiness **from their conversations and completed reports**, not from reading code. When the coherent task is ready, call `repo_request_review` with the task ID and a concise readiness reason.
+3. That tool validates completed Implementer reports and classified inputs, records candidacy, and starts/reuses an independent Reviewer in a separate pane. An existing pending review or valid approval prevents duplicate dispatch. Reviewer inspects actual changes and evidence. Findings return to Lead, which batches remediation and requests re-review when ready. There is no review after every individual edit.
+4. Lead submits `repo_agent_report outcome=completed`. The tool checks current independent Reviewer PASS and idle members. When the turn settles, it rechecks approval and commits task completion; a draft invalidated by subsequent tool use does not prematurely complete the task. Separate model calls to mark candidate/complete are unnecessary. Blocked/incomplete reports do not require approval.
+5. After all required Leads deliver approved completion reports, Orchestrator calls `repo_request_review` with the project ID and its readiness reason. It checks those reports and dispatches Oracle in a separate pane.
+6. Oracle evaluates overall acceptance and actual integration boundaries using valid task approval evidence. Findings return to Orchestrator, which revises/reopens affected tasks and resumes their Leads. Only `repo_project complete` with a current Oracle PASS authorizes overall completion.
 
-The manager's judgment starts review; it does not substitute for independent approval. A settled model turn is not task or project completion. The extension gates state transitions and structured reports, not every natural-language sentence a model might write.
+The manager's judgment starts review; it does not substitute for independent approval. A settled model turn is not task or project completion. The extension gates state transitions and structured reports, not every natural-language sentence a model might write. If dispatch is uncertain, inspect the retained agent before retrying; the tool never blindly resubmits.
 
-### Direct refinements
+A Lead ending a turn without a report remains in `waiting_children` only while it has actual pending children. With no pending children, or a confirmed child interruption, it produces `needs-report` so its parent can request clarification or repair. It cannot silently remain busy forever just because it omitted a brief. Child reports wake only the immediate manager.
 
-Use the **Task Lead pane** for minor adjustments to ongoing work. Direct input is recorded locally and marked pending. The Lead must incorporate the decision into `repo_task_note` before declaring candidacy. Raw input stays in its conversation/local evidence and is not automatically forwarded to Orchestrator. The Lead delegates edits and ultimately sends a bounded result or a material blocker.
+### Direct input in the Task Lead pane
 
-Changes to overall requirements, acceptance criteria or cross-task contracts must be escalated. This semantic distinction remains model judgment, not something a hook can perfectly infer. Direct refinements received during an active review are rejected with a visible message: finish that review first and submit the refinement again. Completed tasks must be explicitly reopened by Orchestrator. This release adds no queue or steering UI. Free-form input in managed Implementer panes is rejected to avoid untracked mutations; use the Lead. User shell commands and independently launched processes remain outside the tool policy.
+Use the **Task Lead pane** for questions and minor adjustments. Each input gets a durable local receipt. `repo_task_input` lets Lead list/read receipts and classify them:
+
+| Kind         | Effect                                                                                                                                   |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `question`   | Answer locally; preserve requirements, decision versions and existing approval.                                                          |
+| `refinement` | Accept an in-scope adjustment, append a compact decision, and invalidate the old task approval. Delegate the actual edit to Implementer. |
+| `escalation` | Record the decision needed and block further advancement until Orchestrator revises/reopens the task.                                    |
+
+Receiving input alone does not invalidate approval. Unclassified input temporarily blocks new delegated work, candidacy and completion; classification as a question releases the block without another review. Classification is model judgment. A hook cannot prove that a requested change was correctly distinguished from a question.
+
+Input may arrive during review. Questions can be answered, but accepting a refinement must wait until the active review settles. The receipt remains pending and readable; the user need not submit the same request again. Completed work accepts questions; changes require escalation and explicit reopening by Orchestrator. Raw input stays in the Lead conversation/local evidence and is not automatically forwarded upward.
+
+Changes to overall requirements, acceptance criteria or cross-task contracts must be escalated. This release adds no queue or steering UI. Free-form input in managed Implementer panes is rejected to avoid untracked mutations; use Lead. User shell commands and independently launched processes remain outside the tool policy.
 
 ### Tools
 
-| Tool                                                        | Manager scope                                                                    |
-| ----------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `repo_agent_list/start/prompt/read/reset/forget`            | Only the caller's directly managed children; role and task restrictions enforced |
-| `repo_project create/list/status/candidate/complete/revise` | Orchestrator: overall requirements and Oracle gate                               |
-| `repo_work create/revise`                                   | Orchestrator: assign or reopen a task, preserving baseline and review budget     |
-| `repo_work list/status`                                     | Orchestrator: tasks; Lead: only its assigned task                                |
-| `repo_work candidate/complete`                              | Task Lead: readiness and Reviewer gate                                           |
-| `repo_task_document`                                        | Orchestrator: configured task-root metadata allowlist                            |
-| `repo_task_note`                                            | Task Lead: its own bounded decisions and handoff notes                           |
-| `repo_source`, `repo_research_fetch`                        | Scoped child source/research access according to role                            |
-| `repo_review_changes`                                       | Reviewer/Oracle: repository roster and paginated before/after content            |
-| `repo_agent_report`                                         | Child: bounded result to its immediate manager                                   |
+| Tool                                              | Scope                                                                                              |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `repo_agent_list/start/prompt/read/reset/forget`  | Only the caller's directly managed children; role and task restrictions enforced                   |
+| `repo_agent_recover`                              | Lead: own direct children; Orchestrator: its family, including grandchildren; confirmed exits only |
+| `repo_project create/list/status/complete/revise` | Orchestrator: overall requirements and Oracle completion gate                                      |
+| `repo_work create/revise`                         | Orchestrator: assign or reopen a task, preserving baseline and review budget                       |
+| `repo_work list/status`                           | Orchestrator: tasks; Lead: only its assigned task                                                  |
+| `repo_request_review`                             | Lead: validate readiness and request Reviewer; Orchestrator: request Oracle                        |
+| `repo_task_document`                              | Orchestrator: configured task-root metadata allowlist                                              |
+| `repo_task_note`, `repo_task_input`               | Lead: bounded decisions and direct-input receipts/classification                                   |
+| `repo_source`, `repo_research_fetch`              | Scoped child source/research access according to role                                              |
+| `repo_review_changes`                             | Reviewer/Oracle: repository roster and paginated before/after content                              |
+| `repo_review_scope`                               | Reviewer: additional dependency files or conservative whole-repository scope                       |
+| `repo_agent_report`                               | Child: bounded result to immediate manager; Lead completion also enforces the approval gate        |
 
 Oracle can retrieve one task's requirements, notes or review brief with `repo_review_changes evidenceTask=<id> section=requirements|notes|brief`, paginated using `offset`. The roster does not concatenate every task's detailed evidence.
 
@@ -117,22 +131,24 @@ Oracle can retrieve one task's requirements, notes or review brief with `repo_re
 - Each task and each project has an initial review plus two re-reviews by default. The user may explicitly extend a budget from the main pane with `/repo-agents extend-review task <task-id>` or `/repo-agents extend-review oracle <project-id>`. No model tool can extend its own budget.
 - Reviewer PASS requires inspection of all pages of baseline changes plus evidence references. Unchanged files inspected in the previous review can retain their coverage; changed files require renewed inspection. Incremental `since=previous_review` helps locate changes, but baseline pages establish coverage for changed files. This checks access provenance, not semantic review quality.
 - Oracle must inspect real changes in each changed repository and evaluate integration evidence; it need not repeat every local file review. The tool can enforce actual access and current state, not prove that integration reasoning or reported verification is correct.
-- Approvals bind to requirements/decision versions, task approval IDs and file fingerprints. Direct pending input, changed artifacts or revised requirements prevent stale completion. Oracle completion rechecks the task approval set.
+- Approvals bind to task requirements/decision versions, project requirements revision, and artifact fingerprints. Unclassified/escalated input blocks completion. Oracle completion rechecks the task approval set and current artifacts.
 - Each task has 1–12 repositories; a project has at most 32 tasks. Unfinished tasks sharing a repository are serialized. Implementers keep exclusive checkout reservations; read-only Leads/reviewers/research can coexist. Approved task completion retires idle Implementers so another task can acquire the checkout. Panes/reports remain. Reopened work needs a new Implementer after forgetting the exited one.
-- Fingerprints cover whole supported repositories. Later tasks changing the same repository conservatively stale earlier task reviews; those tasks may need to be reopened/reviewed before final Oracle approval. There is no file-level approval dependency graph yet. This can increase review work for sequential shared-repo tasks.
+- Task approvals cover changed files plus dependencies recorded from Reviewer source reads/search matches and explicit `repo_review_scope` declarations. Deletions/absent paths and file modes are included. Later task B changing unrelated files in the same repo preserves task A's approval if its recorded files and requirement/decision versions remain unchanged. Final Oracle review is still required.
+- Reviewer declares additional configuration, schema, contract or dynamic-discovery dependencies. Use `wholeRepositories` when the dependency scope cannot be narrowed safely. A changed recorded dependency invalidates approval; re-review must inspect or explicitly re-evaluate it. Scope records stay on disk; parent reports do not contain the file map.
+- This is an observed/declared dependency set, not a complete static dependency graph. Negative searches and newly added dynamically discovered files are not inferred automatically. Missing dependency declarations may defer defect discovery to Oracle. During an active review, whole assigned repository fingerprints must stay stable. Oracle approval always covers complete supported repository snapshots and the task approval set.
 - Context isolation does not guarantee lower total cost: Leads, independent review and fresh implementation contexts add work. This version has no measured savings or quality benchmark.
 
 Snapshots include tracked and non-ignored untracked files for Git/colocated jj. Non-colocated jj uses bounded filesystem enumeration, skipping VCS/dependency/build directories rather than interpreting jj ignore rules. Limits remain 5,000 files, 32 MiB total and 2 MiB per file. Unsupported links/submodules cause refusal, not partial approval. External writers and ignore changes remain observable-scope limitations; snapshots are not a continuous filesystem lock.
 
 ### Updating
 
-Finish old work before restarting Pi. v0.4 role-switching bundles and sessions are **not automatically migrated**. Start a fresh main process/conversation with a concise handoff. This installed local checkout is loaded on restart; `/reload` may retain imported modules. `pre-hierarchy-v0.4.0` preserves the previous source revision. Do not hot-reload this change into active work.
+Finish old work before restarting Pi. Earlier role-switching or hierarchy sessions are **not automatically migrated**. Start a fresh main process/conversation with a concise handoff. This installed local checkout is loaded on restart; `/reload` may retain imported modules. The local `pre-consistency-v0.5.0` bookmark preserves the source before these changes. Do not hot-reload this update into active work.
 
-Configured TypeScript checking and formatting are the only current checks. The existing unit/live-model harnesses target earlier contracts and have **not been migrated or run for v0.5.0**. Historical lifecycle results do not validate nested parents, direct Lead input or new review gates. No runtime/cost claim follows from compilation.
+Configured TypeScript checking and formatting are the only current checks. `checkJs` is disabled globally; compilation is not exhaustive checking of the JavaScript modules. Existing unit/live-model harnesses target earlier contracts and have **not been migrated or run for v0.6.0**. Historical lifecycle results do not validate nested recovery, input classification or approval dependency reuse. No runtime/cost claim follows from compilation.
 
 ## Session lifecycle
 
-Process identity still owns each family. Task Leads have separate coordination scopes and immediate child registries; every descendant also observes ancestor identities. Root exit prevents new work throughout the tree. Busy leaves finish accepted jobs and save results; Leads drain accepted children and record interrupted coordination before exiting. Lead exit drains its own subtree. No new process automatically adopts an old family. Nested behavior is implemented but not runtime-verified in v0.5.0.
+Process identity still owns each family. Task Leads have separate coordination scopes and immediate child registries; every descendant also observes ancestor identities. Root exit prevents new work throughout the tree. Busy leaves finish accepted jobs and save results; Leads drain accepted children and record interrupted coordination before exiting. Lead exit drains its own subtree. No new process automatically adopts an old family. Nested behavior is implemented but not runtime-verified in v0.6.0.
 
 | Event                                                           | Behavior                                                                                                              |
 | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
@@ -155,7 +171,7 @@ Parent checks run locally every two seconds. Normal main shutdown records its in
 
 A timeout or failed prompt submission may occur after text was delivered. The extension retains the registry entry and pane and does not resubmit automatically. Inspect structured status with `repo_agent_read` and inspect the actual child pane directly for raw details. Resolve trust/login questions directly in the child tab. A completed report describes a settled turn, not necessarily a successful task.
 
-A cleanly exited child can be forgotten with `repo_agent_forget`. Its pane, reports and session files remain. A later parent may reserve that checkout after the old child process is confirmed dead. For interrupted launches or crashes, inspect the child pane and any commands it launched, then use `/repo-agents recover <agent ID or relative repo path>`. Recovery checks parent and child process identities, launch expiry and the Herdr agent list; it refuses a live or unknown child and never kills processes. Recovery releases the reservation and preserves evidence. It does not resume or replay interrupted work. Unregistered background commands must be inspected separately.
+A cleanly exited child can be forgotten with `repo_agent_forget`. Its pane, reports and session files remain. A later parent may reserve that checkout after the old child process is confirmed dead. For interrupted launches or crashes, inspect the child pane and any commands it launched, then use `/repo-agents recover <agent ID or relative repo path>`. Recovery checks parent and child process identities, launch expiry and the Herdr agent list; it refuses a live or unknown child and never kills processes. Lead may recover its own direct children from its pane or with `repo_agent_recover`; Orchestrator may recover its family's descendants even while their Lead remains alive. Recovery records interruption, retires the matching task member, removes the registry entry and releases the reservation while retaining evidence. A durable journal allows an interrupted cleanup to be retried by exact agent ID. Recovery does not create a successful report/PASS or resume/replay interrupted work. Unregistered background commands must be inspected separately.
 
 `/repo-agents history` lists up to 50 parent runs for the current root, with report directories and retained agent/job IDs. It is read-only and does not adopt agents or wake a new model turn. Each agent directory contains `<jobId>.result.json` reports and session files. Older results remain available even after the parent exits.
 
@@ -170,7 +186,7 @@ npm ci
 npm run typecheck
 ```
 
-Migrate the existing tests/live harnesses to the v0.5 contract before running them or packaging a release. `npm pack` runs the prepack checks, including those tests.
+Migrate the existing tests/live harnesses to the v0.6 contract before running them or packaging a release. `npm pack` runs the prepack checks, including those tests.
 
 The package has no runtime dependencies beyond Pi-provided peers. `pi` manifest paths and an npm file allowlist limit the archive to the extension, documentation, license and example generator. Do not publish without selecting your own package ownership and version.
 
@@ -188,4 +204,4 @@ The generator refuses an existing project directory. It creates a metadata jj re
 
 [pi-herdr-subagents](https://github.com/0xRichardH/pi-herdr-subagents/tree/7180d986a712e7627986a147ca8e5d5a4e0265da) was reviewed for lifecycle separation and asynchronous delivery ideas. This implementation is independent and does not install that package, include its agent bundles, or route to other harnesses.
 
-The scripts under `scripts/test-live.mjs` and `scripts/test-lifecycle-live.mjs` describe historical v0.3/v0.4 scenarios. They require migration to the hierarchy before use. Future verification must use a dedicated named Herdr session and isolated fixture, covering both approval levels, local refinement, same-checkout serialization, re-review, and ancestor shutdown. Do not point such scripts at ongoing work.
+The scripts under `scripts/test-live.mjs` and `scripts/test-lifecycle-live.mjs` describe historical v0.3/v0.4 scenarios. They require migration to the hierarchy before use. Future verification must use a dedicated named Herdr session and isolated fixture, covering both approval levels, question/refinement/escalation receipts, unrelated-file approval reuse, changed dependencies, nested recovery/retry, missing Lead reports, same-checkout serialization, re-review and ancestor shutdown. Do not point such scripts at ongoing work.

@@ -14,10 +14,10 @@ import {
   workStatus,
   getWork,
   reviseWork,
-  taskCandidate,
   projectAction,
   taskNote,
   extendReview,
+  taskInput,
 } from "./hierarchy.mjs";
 import { repositoryContext } from "./discovery.mjs";
 import childBridge from "./child.ts";
@@ -359,7 +359,7 @@ export default function extension(pi: ExtensionAPI) {
       name: "repo_agent_start",
       label: "Delegate repository work",
       description:
-        "Open a role-specific Herdr pane and submit scoped work. Orchestrator may start task_lead/oracle at repo='.' and optional scout/researcher. Task Lead may start implementer in assigned repos, reviewer at repo='.' after repo_work candidate, and optional researchers. Keep roles in separate panes. Reports return only to the immediate manager; end the turn when waiting. Never retry uncertain delivery blindly.",
+        "Open a role-specific Herdr pane and submit scoped work. Orchestrator may start task_lead/oracle at repo='.' and optional scout/researcher. Task Lead may start implementer in assigned repos, independent reviewer through repo_request_review, and optional researchers. Keep roles in separate panes. Reports return only to the immediate manager; end the turn when waiting. Never retry uncertain delivery blindly.",
       parameters: Type.Object({
         repo: Type.String(),
         role,
@@ -447,6 +447,18 @@ export default function extension(pi: ExtensionAPI) {
   );
   pi.registerTool(
     defineTool({
+      name: "repo_agent_recover",
+      label: "Recover confirmed exited agent",
+      description:
+        "Retire a confirmed dead agent, repair its interrupted job and task membership, and release its reservation. Never kills/adopts live or unknown processes. Lead: own direct children only; Orchestrator: its family. Use after inspecting a failed agent, never retry uncertain live delivery.",
+      parameters: Type.Object({ id }),
+      async execute(_call, params, signal, _update, ctx) {
+        return result(await controller(ctx).recover(params.id, signal));
+      },
+    }),
+  );
+  pi.registerTool(
+    defineTool({
       name: "repo_task_document",
       label: "Task documents",
       description:
@@ -483,15 +495,13 @@ export default function extension(pi: ExtensionAPI) {
       name: "repo_work",
       label: "Reviewable work bundle",
       description:
-        "Orchestrator creates a task within a project before implementation, or revises/reopens its requirements. Task Lead may read its own status, declare candidate based on Implementer reports, and complete only after current independent Reviewer PASS. Completed tasks sharing changed files may need renewed approval. Do not request review after every small edit; batch a coherent completion candidate.",
+        "Orchestrator creates a task within a project before implementation, or revises/reopens its requirements. Task Lead reads its own status. Use repo_request_review to declare readiness; repo_agent_report outcome=completed checks Reviewer PASS and commits task completion. Completed tasks sharing changed files may need renewed approval. Do not request review after every small edit; batch a coherent completion candidate.",
       parameters: Type.Object({
         action: Type.Union([
           Type.Literal("create"),
           Type.Literal("list"),
           Type.Literal("status"),
-          Type.Literal("complete"),
           Type.Literal("revise"),
-          Type.Literal("candidate"),
         ]),
         id: Type.Optional(Type.String()),
         project: Type.Optional(Type.String()),
@@ -509,8 +519,6 @@ export default function extension(pi: ExtensionAPI) {
             if (params.action === "create") return createWork(client, params);
             if (params.action === "revise")
               return reviseWork(client, params.id, params.requirements);
-            if (params.action === "candidate")
-              return taskCandidate(client, params.id);
             if (params.action === "list") {
               const entries = (await listWork(client.workScope)).filter(
                 (w: any) =>
@@ -521,8 +529,36 @@ export default function extension(pi: ExtensionAPI) {
                 truncated: entries.length > 50,
               };
             }
-            return workStatus(client, params.id, params.action === "complete");
+            return workStatus(client, params.id);
           }),
+        );
+      },
+    }),
+  );
+  pi.registerTool(
+    defineTool({
+      name: "repo_request_review",
+      label: "Request independent review",
+      description:
+        "Manager declares readiness in one action. Task Lead: checks completed Implementer reports and input decisions, then starts/reuses Reviewer. Orchestrator: checks approved Lead reports, then starts/reuses Oracle. Returns an existing pending review or valid approval without duplicate dispatch. Does not decide readiness for the manager. Delivery uncertainty requires inspection, not blind retry.",
+      parameters: Type.Object({
+        id: Type.String({
+          description: "Task ID for Task Lead; project ID for Orchestrator.",
+        }),
+        reason: Type.String({ minLength: 1, maxLength: 1200 }),
+      }),
+      async execute(_call, params, signal, _update, ctx) {
+        return result(
+          await controller(ctx).requestReview(
+            {
+              ...params,
+              model: ctx.model
+                ? `${ctx.model.provider}/${ctx.model.id}`
+                : undefined,
+              thinking: ctx.thinkingLevel,
+            },
+            signal,
+          ),
         );
       },
     }),
@@ -532,13 +568,12 @@ export default function extension(pi: ExtensionAPI) {
       name: "repo_project",
       label: "Overall work",
       description:
-        "Orchestrator-only overall requirements and completion gate. Create before tasks. Candidate requires approved completion reports from every Task Lead; then delegate oracle at repo='.' with the project ID as bundle. Complete requires a current Oracle PASS. Revise reopens overall requirements, invalidates its approval and preserves review budget. Status/list are compact; no source/diff.",
+        "Orchestrator-only overall requirements and completion gate. Create before tasks. Use repo_request_review with project ID after all Task Leads report approved completion; it validates readiness and dispatches Oracle. Complete requires a current Oracle PASS. Revise reopens overall requirements, invalidates its approval and preserves review budget. Status/list are compact; no source/diff.",
       parameters: Type.Object({
         action: Type.Union([
           Type.Literal("create"),
           Type.Literal("list"),
           Type.Literal("status"),
-          Type.Literal("candidate"),
           Type.Literal("complete"),
           Type.Literal("revise"),
         ]),
@@ -569,17 +604,63 @@ export default function extension(pi: ExtensionAPI) {
       },
     }),
   );
+  pi.registerTool(
+    defineTool({
+      name: "repo_task_input",
+      label: "Classify Task Lead input",
+      description:
+        "Record the meaning of direct user input: question preserves approvals and stays local; refinement accepts an in-scope change and updates task decisions; escalation asks Orchestrator to resolve scope/acceptance changes and blocks advancement. Inspect pending receipts with list/read. Classification is model judgment; never disguise requested changes as questions.",
+      parameters: Type.Object({
+        action: Type.Union([
+          Type.Literal("list"),
+          Type.Literal("read"),
+          Type.Literal("classify"),
+        ]),
+        id: Type.Optional(Type.String()),
+        kind: Type.Optional(
+          Type.Union([
+            Type.Literal("question"),
+            Type.Literal("refinement"),
+            Type.Literal("escalation"),
+          ]),
+        ),
+        summary: Type.Optional(Type.String({ maxLength: 1200 })),
+      }),
+      async execute(_call, params, _signal, _update, ctx) {
+        const client = controller(ctx);
+        await client.requireOwnership();
+        const value = await client.locked(() => taskInput(client, params));
+        if (
+          params.action === "classify" &&
+          ["refinement", "escalation"].includes(value.kind ?? "")
+        )
+          await child.resumeLead(value.kind === "escalation");
+        return result(value);
+      },
+    }),
+  );
   pi.registerCommand("repo-agents", {
     description: "List discovered repositories and managed Herdr agents",
     handler: async (args, ctx) => {
+      const [action, ...words] = args.trim().split(/\s+/);
       if (child.isChild()) {
-        ctx.ui.notify(
-          "This is a managed child; use its parent for coordination.",
-          "info",
-        );
+        if (
+          child.state().role === "task_lead" &&
+          action === "recover" &&
+          words.length === 1
+        ) {
+          const result = await controller(ctx).recover(words[0]);
+          ctx.ui.notify(
+            `${result.id}: recovered; interrupted work remains incomplete.`,
+            "info",
+          );
+        } else
+          ctx.ui.notify(
+            "Task Leads may use /repo-agents recover <agent-id> for their own children. Other coordination uses tools.",
+            "info",
+          );
         return;
       }
-      const [action, ...words] = args.trim().split(/\s+/);
       if (action === "extend-review") {
         const [kind, bundleId] = words;
         if (!["task", "oracle"].includes(kind))

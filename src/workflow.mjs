@@ -3,7 +3,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readJSON } from "./core.mjs";
+import { readJSON } from "./storage.mjs";
 import { sourceFiles, scopedPath } from "./access.mjs";
 
 const exec = promisify(execFile);

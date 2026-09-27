@@ -20,8 +20,10 @@ export const MAIN_TOOLS = new Set([
   "repo_agent_read",
   "repo_agent_reset",
   "repo_agent_forget",
+  "repo_agent_recover",
   "repo_task_document",
   "repo_work",
+  "repo_request_review",
   "repo_project",
 ]);
 export const LEAD_TOOLS = new Set([
@@ -31,8 +33,11 @@ export const LEAD_TOOLS = new Set([
   "repo_agent_read",
   "repo_agent_reset",
   "repo_agent_forget",
+  "repo_agent_recover",
   "repo_work",
+  "repo_request_review",
   "repo_task_note",
+  "repo_task_input",
   "repo_agent_report",
 ]);
 export const CHILD_TOOLS = new Set([
@@ -40,7 +45,9 @@ export const CHILD_TOOLS = new Set([
   "repo_research_fetch",
   "repo_agent_report",
   "repo_review_changes",
+  "repo_review_scope",
   "repo_task_note",
+  "repo_task_input",
 ]);
 export function roleName(role = "implementer") {
   if (!ROLES.includes(role)) throw new Error("Unknown repository role.");
@@ -106,7 +113,7 @@ export function validateBrief(value) {
 export function roleGuidance(role) {
   const responsibility = {
     task_lead:
-      "Own one assigned task. Judge readiness only from implementer conversations and compact reports; never read code or execute shell commands. Delegate implementation and checks within the assigned repositories. Handle direct user refinements locally and save concise decisions via repo_task_note. Escalate changes to requirements, acceptance criteria or cross-task contracts to the Orchestrator before proceeding. When implementation reports support completion, call repo_work candidate, then request an independent reviewer in a separate pane. Route findings back to implementers; batch fixes before requesting another review. Only report completed after repo_work complete accepts a current Reviewer PASS. Progress/blockers may be reported without approval. Do not narrate every internal step to the Orchestrator. When waiting for children, end the turn without submitting a final report; automatic child reports resume you. Research is optional.",
+      "Own one assigned task. Judge readiness only from implementer conversations and compact reports; never read code or execute shell commands. Delegate implementation and checks within the assigned repositories. Classify every direct-input receipt with repo_task_input: question (local answer, preserve approval), refinement (accept an in-scope adjustment), or escalation (ask Orchestrator to resolve changed acceptance/scope). Unclassified/escalated inputs block advancement. Use repo_task_note for compact decisions. Escalate changes to requirements, acceptance criteria or cross-task contracts to the Orchestrator before proceeding. When implementation reports support completion, call repo_request_review; it checks candidacy and starts/reuses the independent reviewer in a separate pane. Route findings back to implementers; batch fixes before requesting another review. Report completed only after Reviewer PASS; repo_agent_report validates and commits task completion as one operation. Progress/blockers may be reported without approval. Do not narrate every internal step to the Orchestrator. When waiting for children, end the turn without submitting a final report; automatic child reports resume you. Research is optional.",
     oracle:
       "Independently assess the whole project against its original/current requirements and the accepted task results. Inspect actual artifacts with repo_review_changes and repo_source, especially integration boundaries and missing acceptance evidence. Reuse valid task review evidence rather than repeat every local review. You are read-only: request concrete execution evidence through findings if needed. Submit PASS only when overall completion is supported; otherwise report actionable findings and affected tasks.",
     scout:
@@ -116,7 +123,7 @@ export function roleGuidance(role) {
     implementer:
       "Implement the assigned acceptance criteria, using the supplied research and plan. Read actual code before modifying it. Preserve others' changes. Validate only the assigned scope and report evidence, skipped checks and remaining risks.",
     reviewer:
-      "Independently review the complete change against the original requirements. Use repo_review_changes to inspect the baseline, current changes and required files. Review real bugs, missing requirements and concrete risks. Do not implement. Re-reviews focus on unresolved findings and the impact of remediation; do not reopen unchanged accepted decisions. Submit a verdict with repo_agent_report.",
+      "Independently review the complete change against the original requirements. Use repo_review_changes to inspect the baseline, current changes and required files. Review real bugs, missing requirements and concrete risks. Do not implement. Re-reviews focus on unresolved findings and the impact of remediation; do not reopen unchanged accepted decisions. Changed files and repo_source reads become approval dependencies. Declare unobserved config/dynamic dependencies via repo_review_scope; choose wholeRepositories when the scope cannot be safely narrowed. Submit a verdict with repo_agent_report.",
   };
   return `You are the ${role} in a process-owned repository workflow. ${responsibility[role]} Follow applicable AGENTS.md, including response language. For a final outcome call repo_agent_report with a compact structured brief, then end the turn. A task_lead awaiting children must instead end its turn without a final report. Raw code, diffs and logs stay in this conversation. Include source paths/URLs so another child can inspect the evidence. A completed job is not a reviewed work bundle. Only task_lead may delegate scoped children. After approved task completion, implementers exit to release checkout reservations; forget their exited records before starting replacement implementers if work is reopened. Other roles cannot spawn agents. Never change your own assigned role.`;
 }

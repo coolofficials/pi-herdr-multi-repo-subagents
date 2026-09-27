@@ -1,7 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
-import { readJSON, writeJSON, resolveRepo } from "./core.mjs";
+import { readJSON, writeJSON } from "./storage.mjs";
+import { resolveRepo } from "./core.mjs";
+import { approvalScopeValid, taskApprovalScope } from "./approval.mjs";
+import { executionState } from "./execution.mjs";
 import { snapshot, reviewChanges } from "./workflow.mjs";
 import { publicReport } from "./contracts.mjs";
 import { liveness } from "./lifecycle.mjs";
@@ -101,18 +104,31 @@ export async function createProject(client, { title, requirements }) {
 async function idleMembers(client, members, ignoreId) {
   for (const member of members ?? []) {
     if (member.id === ignoreId) continue;
-    const ready = await readJSON(path.join(member.dir, "ready.json"));
-    const req = await readJSON(path.join(member.dir, "request.json"));
-    const report = req
-      ? await readJSON(path.join(member.dir, `${req.jobId}.result.json`))
-      : null;
-    // A dead accepted job still needs explicit recovery; no automatic re-assignment.
-    if (req && !report)
-      throw new Error(`Agent ${member.id} has unfinished/unreported work.`);
-    if (ready?.cleanExit && liveness(ready.instance) === "dead") continue;
+    const state = await executionState(member);
+    if (state.phase === "recovered") continue;
+    if (state.pending)
+      throw new Error(
+        `Agent ${member.id} has unfinished work (${state.phase}); inspect or recover its confirmed exit.`,
+      );
+    if (state.ready?.cleanExit && liveness(state.ready.instance) === "dead")
+      continue;
     const live = (await client.call(["agent", "get", member.id])).result?.agent;
     if (!["idle", "done"].includes(live?.status ?? live?.agent_status))
       throw new Error(`Agent ${member.id} is busy or unavailable.`);
+  }
+}
+export async function retireRecoveredMember(scope, record) {
+  for (const item of await listWork(scope)) {
+    const work = await getWork(scope, item.id);
+    const member = work.members.find((m) => m.id === record.id);
+    const isLead = work.lead?.id === record.id;
+    if (!member && !isLead) continue;
+    if (member) member.retired = true;
+    if (isLead) work.lead.retired = true;
+    work.recoveries ??= [];
+    if (!work.recoveries.some((r) => r.id === record.id))
+      work.recoveries.push({ id: record.id, at: new Date().toISOString() });
+    await save(scope, "work", work);
   }
 }
 export async function createWork(
@@ -210,6 +226,7 @@ export async function authorizeDelegation(client, { role, bundle, repo }) {
     if (bundle !== d.bundle)
       throw new Error("Delegate only inside your assigned task.");
     const w = await getWork(scopeOf(client), bundle);
+    requireClassifiedInputs(w);
     if (w.status === "completed")
       throw new Error(
         "Task is completed. Ask the Orchestrator to reopen it before new work.",
@@ -316,7 +333,10 @@ async function makeReview(client, value, record, jobId, kind, repos) {
       retained,
     );
   }
+  const project =
+    kind === "projects" ? value : await getProject(scope, value.project);
   const review = {
+    projectBinding: { scope, id: project.id, revision: project.revision },
     workScope: scope,
     kind,
     id: value.id,
@@ -334,6 +354,7 @@ async function makeReview(client, value, record, jobId, kind, repos) {
   value.status = "reviewing";
   await save(scope, kind, value);
   return {
+    root: client.root,
     requirements: value.requirements,
     originalRequirements:
       value.history?.[0]?.requirements ?? value.requirements,
@@ -342,6 +363,10 @@ async function makeReview(client, value, record, jobId, kind, repos) {
     previousReview: prior
       ? {
           targets: prior.targets,
+          scope:
+            (await readJSON(path.join(prior.dir, `${prior.jobId}.result.json`)))
+              ?.review?.approvalScope ??
+            (await readJSON(path.join(prior.dir, `${prior.jobId}.scope.json`))),
           brief:
             publicReport(
               await readJSON(
@@ -398,8 +423,8 @@ export async function prepareAssignment(client, record, jobId, role, bundle) {
       const ready = await readJSON(path.join(w.lead.dir, "ready.json"));
       const retired = await readJSON(path.join(w.lead.dir, "recovered.json"));
       if (
-        (!ready?.cleanExit && !retired) ||
-        liveness(ready?.instance) !== "dead" ||
+        (!retired &&
+          (!ready?.cleanExit || liveness(ready?.instance) !== "dead")) ||
         (await client.records()).some((r) => r.id === w.lead.id)
       )
         throw new Error(
@@ -465,8 +490,12 @@ async function reviewValid(value) {
         JSON.stringify(value.tasks))
   )
     return false;
-  for (const s of Object.values(latest.targets))
-    if ((await snapshot(s.path)).fingerprint !== s.target) return false;
+  if (!value.tasks && report.review.approvalScope) {
+    if (!(await approvalScopeValid(report.review.approvalScope))) return false;
+  } else {
+    for (const s of Object.values(latest.targets))
+      if ((await snapshot(s.path)).fingerprint !== s.target) return false;
+  }
   if (value.tasks) {
     for (const approval of latest.taskApprovals ?? []) {
       const task = await getWork(latest.workScope, approval.id);
@@ -482,17 +511,28 @@ async function reviewValid(value) {
   }
   return true;
 }
-export async function workStatus(client, id, complete = false) {
+export async function workStatus(client, id, complete = false, commit = true) {
   if (client.delegation) assertTaskOwner(client, id);
   const scope = scopeOf(client),
     w = await getWork(scope, id);
   if (complete) {
     assertTaskOwner(client, id);
+    requireClassifiedInputs(w);
     await idleMembers(client, w.members);
     if (!(await reviewValid(w)))
       throw new Error(
         "Task completion requires a current independent Reviewer PASS for actual artifacts and current requirements/decisions.",
       );
+    if (!commit)
+      return {
+        id: w.id,
+        status: w.status,
+        approval: {
+          task: w.id,
+          revision: w.revision,
+          reviewJob: w.reviews.at(-1).jobId,
+        },
+      };
     w.status = "completed";
     w.completedAt = new Date().toISOString();
     w.completionBrief = publicReport(
@@ -530,14 +570,11 @@ export async function taskCandidate(client, id) {
   const scope = scopeOf(client),
     w = await getWork(scope, id);
   if (w.status === "completed") throw new Error("Task is already completed.");
-  if (w.pendingInput)
-    throw new Error(
-      "Summarize direct user refinements/decisions with repo_task_note before review candidacy. Escalate scope changes instead of accepting them locally.",
-    );
+  requireClassifiedInputs(w);
   await idleMembers(client, w.members);
   for (const repo of Object.keys(w.repos)) {
     const implementer = w.members
-      .filter((m) => m.repo === repo && m.role === "implementer")
+      .filter((m) => !m.retired && m.repo === repo && m.role === "implementer")
       .at(-1);
     const req = implementer
       ? await readJSON(path.join(implementer.dir, "request.json"))
@@ -568,6 +605,7 @@ async function approvedTasks(client, p) {
   const tasks = [];
   for (const id of p.tasks) {
     const w = await getWork(scopeOf(client), id);
+    requireClassifiedInputs(w);
     if (w.status !== "completed" || !(await reviewValid(w)))
       throw new Error(`Task ${id} is incomplete or its approval is stale.`);
     if (!w.lead) throw new Error("Task has no lead report.");
@@ -689,6 +727,7 @@ export async function reviseWork(client, id, requirements) {
   w.history ??= [];
   w.history.push({ revision: w.revision, requirements: w.requirements });
   w.requirements = requirements;
+  delete w.escalation;
   w.revision++;
   w.status = "working";
   p.status = "working";
@@ -721,9 +760,10 @@ export async function taskNote(
       client,
       w.members.filter((m) => m.role === "reviewer"),
     );
+    if (w.notes === text)
+      return { id, text: w.notes, revision: w.noteRevision };
     w.notes = text;
     w.noteRevision++;
-    w.pendingInput = false;
     w.status = "working";
     await save(scope, "work", w);
   }
@@ -839,13 +879,19 @@ export async function validateReviewTarget(request, dir, jobId) {
           );
     }
   }
+  if (review.kind === "work")
+    return {
+      ...review,
+      approvalScope: await taskApprovalScope(request, dir, jobId),
+    };
   return review;
 }
 export async function validateLeadCompletion(scope, bundle) {
   const w = await getWork(scope, bundle);
+  requireClassifiedInputs(w);
   if (w.status !== "completed" || !(await reviewValid(w)))
     throw new Error(
-      "Task Lead cannot report completion before a current Reviewer approval and repo_work complete.",
+      "Task Lead completion requires a current Reviewer approval and a committed task completion state.",
     );
   return {
     task: bundle,
@@ -865,23 +911,123 @@ export async function extendReview(client, kind, id) {
   return value.reviewLimit;
 }
 
+export function requireClassifiedInputs(work) {
+  if (work.pendingInput || work.pendingReceipts?.length)
+    throw new Error(
+      "Classify received input with repo_task_input before advancing work. Questions do not invalidate approvals.",
+    );
+  if (work.escalation)
+    throw new Error(
+      "A scope/acceptance change is awaiting Orchestrator resolution. Report the blocker; do not advance implementation/review.",
+    );
+}
 export async function recordDirectInput(client, text) {
   const id = client.delegation?.bundle;
   assertTaskOwner(client, id);
   const scope = scopeOf(client),
-    w = await getWork(scope, id);
-  if (w.status === "completed")
-    throw new Error("Reopen this task through Orchestrator first.");
-  await idleMembers(
-    client,
-    w.members.filter((m) => m.role === "reviewer"),
-  );
-  w.inputRevision = (w.inputRevision ?? 0) + 1;
-  w.pendingInput = true;
-  w.status = "working";
+    work = await getWork(scope, id);
+  work.pendingReceipts ??= [];
+  if (work.pendingReceipts.length >= 50)
+    throw new Error(
+      "Resolve the current input inbox before accepting more messages.",
+    );
+  const receipt = {
+    id: randomUUID(),
+    text,
+    kind: "unclassified",
+    receivedAt: new Date().toISOString(),
+  };
   await writeJSON(
-    path.join(scope, "work", `${id}.input-${w.inputRevision}.json`),
-    { text, at: new Date().toISOString() },
+    path.join(scope, "inputs", id, `${receipt.id}.json`),
+    receipt,
   );
-  await save(scope, "work", w);
+  work.pendingReceipts.push(receipt.id);
+  await save(scope, "work", work);
+  return receipt.id;
+}
+export async function taskInput(
+  client,
+  {
+    action,
+    id = /** @type {string|undefined} */ (undefined),
+    kind = /** @type {string|undefined} */ (undefined),
+    summary = /** @type {string|undefined} */ (undefined),
+  },
+) {
+  const task = client.delegation?.bundle;
+  assertTaskOwner(client, task);
+  const scope = scopeOf(client),
+    work = await getWork(scope, task);
+  if (action === "list")
+    return {
+      task,
+      pending: work.pendingReceipts ?? [],
+      escalation: work.escalation ?? null,
+    };
+  idCheck(id);
+  const file = path.join(scope, "inputs", task, `${id}.json`),
+    receipt = await readJSON(file);
+  if (!receipt) throw new Error("Unknown input for this task.");
+  if (action === "read") return receipt;
+  if (
+    action !== "classify" ||
+    !["question", "refinement", "escalation"].includes(kind)
+  )
+    throw new Error("Classify as question, refinement or escalation.");
+  if (work.inputDecisions?.[id]) {
+    const decision = work.inputDecisions[id];
+    await writeJSON(file, { ...receipt, ...decision });
+    return { ...decision, status: "already-classified" };
+  }
+  if (receipt.kind !== "unclassified")
+    return { id, kind: receipt.kind, status: "already-classified" };
+  if (typeof summary !== "string" || !summary.trim() || summary.length > 1200)
+    throw new Error(
+      "Provide a concise classification/decision summary (1–1200 characters).",
+    );
+  if (kind === "refinement") {
+    if (work.status === "completed")
+      throw new Error(
+        "Completed work needs Orchestrator reopening; classify this request as escalation instead.",
+      );
+    await idleMembers(
+      client,
+      work.members.filter((m) => m.role === "reviewer"),
+    );
+    const notes = `${work.notes}\n${summary}`.trim();
+    if (notes.length > 8000)
+      throw new Error(
+        "Task decisions exceed 8000 characters; compact existing notes before accepting this refinement.",
+      );
+    work.notes = notes;
+    work.noteRevision++;
+    work.inputRevision = (work.inputRevision ?? 0) + 1;
+    work.status = "working";
+  }
+  if (kind === "escalation") work.escalation = { input: id, summary };
+  // Persist the acceptance decision before acknowledging its receipt. Retry repairs a partial write.
+  work.inputDecisions ??= {};
+  const decision = { id, kind, summary };
+  work.inputDecisions[id] = decision;
+  for (const old of Object.keys(work.inputDecisions).slice(0, -100))
+    delete work.inputDecisions[old];
+  work.pendingReceipts = (work.pendingReceipts ?? []).filter((x) => x !== id);
+  await save(scope, "work", work);
+  await writeJSON(file, {
+    ...receipt,
+    ...decision,
+    classifiedAt: new Date().toISOString(),
+  });
+  return {
+    task,
+    ...decision,
+    status: "classified",
+    approvalChanged: kind === "refinement",
+    instruction:
+      kind === "escalation"
+        ? "Report the decision needed to Orchestrator; do not implement the scope change."
+        : kind === "question"
+          ? "Answer locally; no approval change or parent report is needed."
+          : "Continue implementation through the task's Implementers.",
+  };
 }

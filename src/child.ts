@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { childWorkState, setJobPhase } from "./execution.mjs";
 import { randomUUID } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-coding-agent";
@@ -11,6 +12,7 @@ import {
   roleName,
   validateBrief,
 } from "./contracts.mjs";
+import { addReviewDependencies, noteSourceAccess } from "./approval.mjs";
 import { inspectSource, fetchSource } from "./access.mjs";
 import {
   inspectHierarchyReview,
@@ -18,6 +20,7 @@ import {
   validateLeadCompletion,
   getWork,
   recordDirectInput,
+  workStatus,
 } from "./hierarchy.mjs";
 import type {
   ExtensionAPI,
@@ -38,6 +41,8 @@ export default function childBridge(pi: ExtensionAPI) {
   let dir: string | undefined;
   let launch: any;
   let coordinator: any;
+  let localInputTurn = false;
+  let localReceipt: string | undefined;
   let request: any;
   let role = "scout";
   let normalTools: string[] = [];
@@ -88,15 +93,34 @@ export default function childBridge(pi: ExtensionAPI) {
         brief = undefined;
       }
     }
-    if (role === "task_lead" && !brief && !forced && outcome === "completed")
-      return;
+    if (role === "task_lead" && !brief && !forced && outcome === "completed") {
+      const children = await childWorkState(
+        coordinator ? await coordinator.records() : [],
+      );
+      if (children.waiting.length && !children.interrupted.length) {
+        await setJobPhase(dir, id, "waiting_children", {
+          children: children.waiting,
+        });
+        await checkpoint();
+        return;
+      }
+      // No actual wait target: close this job as needs-report so its parent can repair it.
+      await setJobPhase(dir, id, "needs_report", {
+        interrupted: children.interrupted,
+      });
+    }
     let taskApproval = submitted?.taskApproval;
-    if (role === "task_lead" && brief?.outcome === "completed") {
+    if (
+      role === "task_lead" &&
+      brief?.outcome === "completed" &&
+      !forced &&
+      outcome === "completed"
+    ) {
       try {
-        taskApproval = await validateLeadCompletion(
-          launch.workScope,
-          request.bundle,
-        );
+        taskApproval = await coordinator.locked(async () => {
+          await workStatus(coordinator, request.bundle, true);
+          return validateLeadCompletion(launch.workScope, request.bundle);
+        });
       } catch {
         brief = validateBrief({
           outcome: "incomplete",
@@ -109,7 +133,7 @@ export default function childBridge(pi: ExtensionAPI) {
     let review = submitted?.review;
     if (review && brief?.verdict === "pass") {
       try {
-        await validateReviewTarget(request, dir, id);
+        review = await validateReviewTarget(request, dir, id);
       } catch {
         brief = validateBrief({
           outcome: "incomplete",
@@ -139,7 +163,15 @@ export default function childBridge(pi: ExtensionAPI) {
         finishedAt: new Date().toISOString(),
       });
     }
-    await writeJSON(path.join(dir, "activity.json"), { jobId: id, status });
+    await setJobPhase(
+      dir,
+      id,
+      status === "needs-report"
+        ? "needs_report"
+        : status === "settled"
+          ? "settled"
+          : "interrupted",
+    );
     jobId = undefined;
     messages = [];
     await checkpoint();
@@ -255,7 +287,13 @@ export default function childBridge(pi: ExtensionAPI) {
     if (!READ_ONLY_ROLES.has(role))
       return jobId
         ? normalTools.filter(
-            (name) => !["repo_review_changes", "repo_task_note"].includes(name),
+            (name) =>
+              ![
+                "repo_review_changes",
+                "repo_review_scope",
+                "repo_task_note",
+                "repo_task_input",
+              ].includes(name),
           )
         : ["repo_source"];
     return [
@@ -263,6 +301,7 @@ export default function childBridge(pi: ExtensionAPI) {
       "repo_agent_report",
       ...(role === "researcher" ? ["repo_research_fetch"] : []),
       ...(["reviewer", "oracle"].includes(role) ? ["repo_review_changes"] : []),
+      ...(role === "reviewer" ? ["repo_review_scope"] : []),
     ];
   };
   const applyRole = () => {
@@ -288,12 +327,12 @@ export default function childBridge(pi: ExtensionAPI) {
     content: [{ type: "text" as const, text: JSON.stringify(value) }],
     details: value,
   });
-  const resumeLead = async () => {
+  const resumeLead = async (allowCompleted = false) => {
     if (role !== "task_lead" || jobId || !coordinator || parentGone || detached)
       return;
     await coordinator.locked(async () => {
       const work = await getWork(launch.workScope, launch.bundle);
-      if (work.status === "completed") return;
+      if (work.status === "completed" && !allowCompleted) return;
       const prior = await readJSON(path.join(dir!, "request.json"));
       if (!prior) throw new Error("Task Lead has no assigned request.");
       const next = {
@@ -326,10 +365,12 @@ export default function childBridge(pi: ExtensionAPI) {
   };
   pi.on("before_agent_start", async (event, ctx) => {
     if (!isChild() || detached) return;
-    await resumeLead();
+    if (!localInputTurn) await resumeLead();
     applyRole();
     event.systemPromptOptions.selectedTools = allowed();
     event.systemPromptOptions.sections.pi_repo_role = roleGuidance(role);
+    if (localReceipt)
+      event.systemPromptOptions.sections.pi_repo_role += `\nLocal input receipt ${localReceipt}: classify with repo_task_input before taking action. Questions stay local and preserve approvals.`;
     if (!jobId)
       event.systemPromptOptions.sections.pi_repo_role +=
         "\nThere is no delegated job. Answer questions only; do not modify artifacts, submit a parent report or claim bundle completion. Direct refinements belong in Task Lead pane.";
@@ -374,12 +415,18 @@ export default function childBridge(pi: ExtensionAPI) {
           throw new Error(
             "Task Lead plans from reports; source access is unavailable.",
           );
-        return result(
-          await inspectSource(
-            params.scope === "task" ? launch.root : launch.cwd,
+        const base = params.scope === "task" ? launch.root : launch.cwd;
+        const inspected = await inspectSource(base, params);
+        if (role === "reviewer" && jobId)
+          await noteSourceAccess(
+            activeRequest(),
+            dir!,
+            jobId,
+            base,
             params,
-          ),
-        );
+            inspected,
+          );
+        return result(inspected);
       },
     }),
   );
@@ -463,6 +510,16 @@ export default function childBridge(pi: ExtensionAPI) {
               fileState.next = inspected.nextOffset;
             }
             entry.files[params.file] = fileState;
+            if (role === "reviewer" && fileState.complete) {
+              const target = work.contract.review.targets[params.repo];
+              const file = path.relative(
+                launch.root,
+                path.join(target.path, params.file),
+              );
+              await addReviewDependencies(work, dir!, jobId!, {
+                files: [file],
+              });
+            }
           }
           await writeJSON(
             path.join(dir!, `${jobId}.inspection.json`),
@@ -470,6 +527,29 @@ export default function childBridge(pi: ExtensionAPI) {
           );
         }
         return result(inspected);
+      },
+    }),
+  );
+  pi.registerTool(
+    defineTool({
+      name: "repo_review_scope",
+      label: "Declare task approval dependencies",
+      description:
+        "Reviewer-only: declare dependency files relative to task root, including absent files whose absence matters. Changed files and source reads are recorded automatically. Use wholeRepositories (assigned repo paths) for dynamic/configuration behavior whose dependencies cannot be safely narrowed. Unchanged dependencies allow approval reuse after unrelated work; Oracle still verifies integration.",
+      parameters: Type.Object({
+        files: Type.Optional(Type.Array(Type.String(), { maxItems: 1000 })),
+        wholeRepositories: Type.Optional(
+          Type.Array(Type.String(), { maxItems: 12 }),
+        ),
+      }),
+      async execute(_call, params) {
+        if (role !== "reviewer")
+          throw new Error(
+            "Only the assigned Reviewer declares task approval scope.",
+          );
+        return result(
+          await addReviewDependencies(activeRequest(), dir!, jobId!, params),
+        );
       },
     }),
   );
@@ -508,11 +588,13 @@ export default function childBridge(pi: ExtensionAPI) {
         const brief = validateBrief(params);
         let review;
         let taskApproval;
-        if (role === "task_lead" && brief.outcome === "completed")
-          taskApproval = await validateLeadCompletion(
-            launch.workScope,
-            work.bundle,
+        if (role === "task_lead" && brief.outcome === "completed") {
+          await coordinator.requireOwnership();
+          const checked = await coordinator.locked(() =>
+            workStatus(coordinator, work.bundle, true, false),
           );
+          taskApproval = checked.approval;
+        }
         if (["reviewer", "oracle"].includes(role)) {
           if (!brief.verdict || !work.contract?.review)
             throw new Error(
@@ -529,9 +611,10 @@ export default function childBridge(pi: ExtensionAPI) {
             throw new Error(
               "PASS needs acceptance/verification evidence and references without unresolved risks or next steps. Otherwise submit changes_requested/unknown.",
             );
-          if (brief.verdict === "pass")
-            await validateReviewTarget(work, dir!, jobId!);
-          review = work.contract.review;
+          review =
+            brief.verdict === "pass"
+              ? await validateReviewTarget(work, dir!, jobId!)
+              : work.contract.review;
         } else if (brief.verdict)
           throw new Error(
             "Only an assigned independent reviewer may submit a review verdict.",
@@ -663,23 +746,13 @@ export default function childBridge(pi: ExtensionAPI) {
       }
       if (!event.text.startsWith(MARKER)) {
         if (role === "task_lead") {
-          const w = await getWork(launch.workScope, launch.bundle);
-          if (w.status === "completed") {
-            ctx.ui.notify(
-              "This task is complete. Ask the Orchestrator to reopen it before further refinements.",
-              "warning",
-            );
-            return { action: "handled" };
-          }
           if (event.text.length > 8000)
-            throw new Error(
-              "Direct Task Lead input exceeds 8000 characters; narrow it or use reference paths.",
-            );
+            throw new Error("Direct Task Lead input exceeds 8000 characters.");
           await coordinator.requireOwnership();
-          await coordinator.locked(() =>
+          localReceipt = await coordinator.locked(() =>
             recordDirectInput(coordinator, event.text),
           );
-          await resumeLead();
+          localInputTurn = true;
         } else if (["implementer"].includes(role)) {
           ctx.ui.notify(
             "Send refinements to the Task Lead pane so they remain in the task/review flow.",
@@ -704,6 +777,8 @@ export default function childBridge(pi: ExtensionAPI) {
         throw new Error(
           "An existing job is still active; refusing replacement.",
         );
+      localInputTurn = false;
+      localReceipt = undefined;
       setRequest(request);
       const assignedRole = roleName(request.role ?? "implementer");
       if (assignedRole !== role && jobId)
@@ -744,6 +819,8 @@ export default function childBridge(pi: ExtensionAPI) {
   pi.on("agent_settled", async (_event, ctx) => {
     if (!isChild()) return;
     await finish(ctx);
+    localInputTurn = false;
+    localReceipt = undefined;
     await observeParent();
     await maybeExit(ctx);
   });
@@ -821,6 +898,7 @@ export default function childBridge(pi: ExtensionAPI) {
   return {
     isChild,
     state: () => ({ role, launch, dir, request, parentGone }),
+    resumeLead,
     setCoordinator: (value: any) => {
       coordinator = value;
     },

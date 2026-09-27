@@ -1,4 +1,6 @@
 import fs from "node:fs/promises";
+import { readJSON, writeJSON } from "./storage.mjs";
+import { executionState, interruptRecoveredJob } from "./execution.mjs";
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -8,6 +10,11 @@ import {
   prepareAssignment,
   getWork,
   getProject,
+  retireRecoveredMember,
+  taskCandidate,
+  workStatus,
+  projectAction,
+  assertTaskOwner,
 } from "./hierarchy.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -49,22 +56,7 @@ export const MARKER = "PI_HERDR_TASK:";
 export const childExtension = fileURLToPath(
   new URL("./index.ts", import.meta.url),
 );
-export async function readJSON(file, fallback = /** @type {any} */ (null)) {
-  try {
-    return JSON.parse(await fs.readFile(file, "utf8"));
-  } catch (e) {
-    if (e.code === "ENOENT") return fallback;
-    throw e;
-  }
-}
-export async function writeJSON(file, value) {
-  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const temp = `${file}.${randomUUID()}.tmp`;
-  await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, {
-    mode: 0o600,
-  });
-  await fs.rename(temp, file);
-}
+export { readJSON, writeJSON } from "./storage.mjs";
 async function exists(file) {
   try {
     await fs.lstat(file);
@@ -515,89 +507,221 @@ export class Controller {
   async recover(repo, signal) {
     await this.requireOwnership();
     return this.locked(async () => {
-      let selected, reservationKey;
+      let record;
       if (/^repo-[a-f0-9-]+$/.test(repo)) {
-        const runs = (await this.history()).runs;
-        const record = runs
-          .flatMap((run) => run.agents)
-          .find((r) => r.id === repo);
-        if (!record)
-          throw new Error(
-            "Unknown retained agent ID; inspect /repo-agents history.",
+        // A retained launch remains discoverable after partial registry cleanup.
+        const runs = await fs.readdir(path.dirname(this.scope), {
+          withFileTypes: true,
+        });
+        for (const run of runs.filter((r) => r.isDirectory())) {
+          const scope = path.join(path.dirname(this.scope), run.name);
+          const found = (
+            await readJSON(path.join(scope, "agents.json"), [])
+          ).find((r) => r.id === repo);
+          const journal = await readJSON(
+            path.join(scope, repo, "recovery.json"),
           );
-        selected = { repo: record.repo, path: record.path };
-        reservationKey = record.reservationKey ?? record.path;
+          if (found || journal?.record) {
+            record = found ?? journal.record;
+            break;
+          }
+        }
       } else {
-        selected =
+        const selected =
           repo === "."
-            ? { repo: ".", path: this.root }
+            ? { path: this.root }
             : await resolveRepo(this.root, repo);
-        reservationKey = selected.path;
-      }
-      const held = this.lifecycle.reservation(reservationKey);
-      if (!held) {
-        const records = await this.records();
-        const record = records.find((record) => record.path === selected.path);
-        if (record && (await readJSON(path.join(record.dir, "recovered.json"))))
-          await writeJSON(
-            this.indexFile,
-            records.filter((item) => item.id !== record.id),
+        const held = this.lifecycle.reservation(selected.path);
+        if (held) {
+          const index = await readJSON(
+            path.join(path.dirname(held.dir), "agents.json"),
+            [],
           );
-        return { repo, status: "not-reserved" };
+          record =
+            index.find((r) => r.id === held.agentId) ??
+            (await readJSON(path.join(held.dir, "recovery.json")))?.record;
+        }
       }
-      const parent = await readJSON(
-        path.join(path.dirname(held.dir), "parent.json"),
-      );
-      if (
-        parent?.instance?.token !== this.identity.token &&
-        liveness(parent?.instance) !== "dead"
-      )
+      if (!record)
         throw new Error(
-          "The previous parent is alive or unknown. Recovery cannot take ownership from it.",
+          "No retained agent found. Use an exact agent ID from history.",
         );
-      const launch = await readJSON(path.join(held.dir, "launch.json"));
-      const ready = await readJSON(path.join(held.dir, "ready.json"));
-      const claim = await readJSON(path.join(held.dir, "claim.json"));
-      const identity = ready?.instance ?? claim;
+      const launch = await readJSON(path.join(record.dir, "launch.json"));
+      const parentScope = path.dirname(record.dir);
+      const parent = await readJSON(path.join(parentScope, "parent.json"));
+      const family = launch?.workScope ?? parentScope;
+      if (this.delegation) {
+        if (
+          parentScope !== this.scope ||
+          record.bundle !== this.delegation.bundle
+        )
+          throw new Error(
+            "A Task Lead may recover only its own direct task children.",
+          );
+      } else if (
+        family !== this.workScope &&
+        liveness(parent?.instance) !== "dead"
+      ) {
+        throw new Error(
+          "This is another live family's agent; recovery cannot take ownership.",
+        );
+      }
+      if (launch && launch.root !== this.root)
+        throw new Error("Recovery root does not match.");
+      const ready = await readJSON(path.join(record.dir, "ready.json"));
+      const identity =
+        ready?.instance ??
+        (await readJSON(path.join(record.dir, "claim.json")));
       if (identity && liveness(identity) !== "dead")
         throw new Error(
-          "The child process is alive or unknown. Finish or exit it before recovery.",
+          "Agent process is alive or unknown; do not recover it.",
         );
       if (launch && !identity && Date.now() <= launch.expiresAt)
         throw new Error(
-          "The launch window is still open. Wait for it to expire before recovering an uninitialized child.",
+          "Launch may still start; wait for its expiry before recovery.",
         );
       if (launch?.socket && launch.socket !== this.env.HERDR_SOCKET_PATH)
-        throw new Error(
-          "Inspect and recover this checkout from its original Herdr server.",
-        );
-      const response = await this.call(["agent", "list"], signal);
-      const agents = response.result?.agents;
-      if (!Array.isArray(agents))
-        throw new Error("Cannot inspect Herdr agents safely.");
+        throw new Error("Recover from the original Herdr server.");
+      const agents = (await this.call(["agent", "list"], signal)).result
+        ?.agents;
       if (
+        !Array.isArray(agents) ||
         agents.some(
-          (agent) =>
-            agent.name === held.agentId ||
-            (launch?.pane && agent.pane_id === launch.pane),
+          (a) =>
+            a.name === record.id || (record.pane && a.pane_id === record.pane),
         )
       )
         throw new Error(
-          "Herdr still reports an agent in the retained pane. Inspect and exit it before recovery.",
+          "Herdr still reports the agent or cannot confirm its absence; inspect its pane.",
         );
-      await writeJSON(path.join(held.dir, "recovered.json"), {
+      await writeJSON(path.join(record.dir, "recovery.json"), {
+        record,
+        status: "repairing",
+        recoveredBy: this.identity.token,
+      });
+      await interruptRecoveredJob(record.dir);
+      await retireRecoveredMember(family, record);
+      const indexFile = path.join(parentScope, "agents.json");
+      await writeJSON(
+        indexFile,
+        (await readJSON(indexFile, [])).filter((r) => r.id !== record.id),
+      );
+      this.lifecycle.unreserve(record.reservationKey ?? record.path, record.id);
+      await writeJSON(path.join(record.dir, "recovered.json"), {
+        status: "recovered",
         recoveredBy: this.identity.token,
         recoveredAt: new Date().toISOString(),
       });
-      // Release first: if registry cleanup fails, retrying can still repair it.
-      this.lifecycle.unreserve(reservationKey, held.agentId);
-      if (path.dirname(held.dir) === this.scope)
-        await writeJSON(
-          this.indexFile,
-          (await this.records()).filter((record) => record.id !== held.agentId),
-        );
-      return { repo, status: "recovered", retained: held.dir };
+      await writeJSON(path.join(record.dir, "recovery.json"), {
+        record,
+        status: "recovered",
+        recoveredBy: this.identity.token,
+      });
+      return {
+        id: record.id,
+        status: "recovered",
+        message:
+          "Interrupted work remains incomplete; inspect artifacts before assigning a replacement. Evidence is retained.",
+      };
     });
+  }
+  async requestReview(
+    {
+      id,
+      reason,
+      model = /** @type {string|undefined} */ (undefined),
+      thinking = /** @type {string|undefined} */ (undefined),
+    },
+    signal,
+  ) {
+    if (typeof reason !== "string" || !reason.trim() || reason.length > 1200)
+      throw new Error(
+        "Explain why the assigned work is ready for review (1–1200 characters).",
+      );
+    await this.requireOwnership();
+    if (this.delegation) assertTaskOwner(this, id);
+    const role = this.delegation ? "reviewer" : "oracle";
+    const prepared = await this.locked(async () => {
+      if (role === "oracle") await getProject(this.workScope, id);
+      let record = (await this.records()).find(
+        (r) => r.role === role && r.bundle === id,
+      );
+      if (record) {
+        const state = await executionState(record);
+        if (state.pending && state.phase === "interrupted")
+          throw new Error(
+            `Review agent ${record.id} exited before reporting. Inspect and recover its confirmed exit before another review.`,
+          );
+        if (state.pending)
+          return { pending: true, record, status: state.phase };
+        if (
+          [
+            "creating-pane",
+            "pane-creation-uncertain",
+            "starting",
+            "submission-uncertain",
+            "resetting",
+            "needs-attention",
+          ].includes(record.phase) &&
+          !state.report
+        )
+          throw new Error(
+            `Review agent ${record.id} has uncertain delivery. Inspect/recover it before another request.`,
+          );
+      }
+      const current =
+        role === "reviewer"
+          ? await getWork(this.workScope, id)
+          : await getProject(this.workScope, id);
+      const status =
+        current.status === "completed"
+          ? role === "reviewer"
+            ? await workStatus(this, id)
+            : await projectAction(this, { action: "status", id })
+          : role === "reviewer"
+            ? (await taskCandidate(this, id), await workStatus(this, id))
+            : await projectAction(this, { action: "candidate", id });
+      if (
+        current.status === "completed" &&
+        !(role === "reviewer" ? status.reviewValid : status.oracleValid)
+      )
+        throw new Error(
+          "Completed work has stale approval. Reopen the affected work before requesting review.",
+        );
+      return {
+        record,
+        pending: false,
+        approved: role === "reviewer" ? status.reviewValid : status.oracleValid,
+      };
+    });
+    if (prepared.pending)
+      return {
+        id: prepared.record.id,
+        status: prepared.status,
+        message:
+          "An accepted review already exists. Await its report; no duplicate was sent.",
+      };
+    if (prepared.approved)
+      return {
+        status: "approved",
+        message:
+          "Existing independent approval still covers current requirements and artifacts. No duplicate review needed.",
+      };
+    const task = `Independently inspect the ${role === "oracle" ? "overall project and integration" : "task artifacts"} against its requirements and evidence. Manager readiness judgment: ${reason}. Return actionable findings or a supported PASS through repo_agent_report.`;
+    if (prepared.record) {
+      const state = await executionState(prepared.record);
+      if (state.ready?.cleanExit && liveness(state.ready.instance) === "dead")
+        await this.forget({ id: prepared.record.id }, signal);
+      else
+        return this.prompt(
+          { id: prepared.record.id, bundle: id, task },
+          signal,
+        );
+    }
+    return this.start(
+      { repo: ".", role, bundle: id, task, model, thinking },
+      signal,
+    );
   }
   async start(
     {
