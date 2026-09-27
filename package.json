@@ -1,0 +1,49 @@
+{
+  "name": "pi-herdr-multi-repo-subagents",
+  "version": "0.2.0",
+  "description": "Delegate repository work to visible Pi sessions in Herdr panes.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "herdr",
+    "subagents",
+    "multi-repo"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "examples",
+    "scripts"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.87.1",
+    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@types/node": "^24.0.0",
+    "prettier": "^3.9.9",
+    "typescript": "^5.9.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run typecheck && npm test && npm run format:check",
+    "format:check": "prettier --check src test scripts package.json README.md tsconfig.json",
+    "test:live": "node scripts/test-live.mjs"
+  }
+}
