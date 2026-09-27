@@ -4,13 +4,18 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Controller } from "./core.mjs";
+import path from "node:path";
+import { Controller, writeJSON } from "./core.mjs";
 import { repositoryContext } from "./discovery.mjs";
+import childBridge from "./child.ts";
+import { handoffs } from "./lifecycle.mjs";
 
 export default function extension(pi: ExtensionAPI) {
-  if (process.env.PI_HERDR_CHILD_DIR) return;
+  const child = childBridge(pi);
   const controllers = new Map<string, Controller>();
   const controller = (ctx: ExtensionContext) => {
+    if (child.isChild())
+      throw new Error("A child cannot control its parent's repository agents.");
     if (!controllers.has(`${ctx.cwd}:${ctx.sessionManager.getSessionId()}`))
       controllers.set(
         `${ctx.cwd}:${ctx.sessionManager.getSessionId()}`,
@@ -36,12 +41,14 @@ export default function extension(pi: ExtensionAPI) {
   const stop = () => {
     generation++;
     if (timer) clearTimeout(timer);
+    timer = undefined;
   };
   const monitor = async (ctx: ExtensionContext, version: number) => {
     try {
       const client = controller(ctx);
+      client.lifecycle?.assertOwned();
       const pending = (await client.records()).filter(
-        (r: any) => r.owner === ctx.sessionManager.getSessionId() && r.jobId,
+        (r: any) => r.owner === client.owner && r.jobId,
       );
       const updates: any[] = [];
       const labels: string[] = [];
@@ -56,7 +63,10 @@ export default function extension(pi: ExtensionAPI) {
         const key = `${record.jobId}:${value.report ? "report" : value.status}`;
         if (
           !delivered.has(key) &&
-          (value.report || ["blocked", "unavailable"].includes(value.status))
+          (value.report ||
+            ["blocked", "unavailable", "interrupted", "detached"].includes(
+              value.status,
+            ))
         )
           updates.push({ key, value });
       }
@@ -87,7 +97,21 @@ export default function extension(pi: ExtensionAPI) {
     }
   };
   const refreshDiscovery = async (ctx: ExtensionContext) => {
-    const snapshot = await controller(ctx).list();
+    const client = controller(ctx);
+    const snapshot = await client.list();
+    if (snapshot.repositories.length || snapshot.agents.length) {
+      const state = await client.connect({
+        sessionFile: ctx.sessionManager.getSessionFile(),
+        handoff: handoffs.has(client.root) || snapshot.agents.length === 0,
+      });
+      if (!state.acquired) {
+        ctx.ui.setStatus(
+          "repo-discovery",
+          `Coordination unavailable: ${state.reason}`,
+        );
+        return `Repository coordination is owned by another session or needs an explicit same-process handoff. ${state.reason} Do not work around this by spawning agents or modifying the shared repositories from here.`;
+      }
+    }
     ctx.ui.setStatus(
       "repo-discovery",
       snapshot.repositories.length
@@ -98,11 +122,14 @@ export default function extension(pi: ExtensionAPI) {
   };
   const begin = async (_event: unknown, ctx: ExtensionContext) => {
     stop();
+    if (child.isChild()) return;
     delivered.clear();
+    for (const key of handoffs.get(controller(ctx).root)?.deliveryKeys ?? [])
+      delivered.add(key);
     for (const entry of ctx.sessionManager.getBranch()) {
       if (
         entry.type === "custom_message" &&
-        entry.customType === "repo-agent-reports"
+        ["repo-agent-reports", "repo-agent-handoff"].includes(entry.customType)
       ) {
         for (const key of (entry.details as { deliveryKeys?: string[] })
           ?.deliveryKeys ?? [])
@@ -111,7 +138,10 @@ export default function extension(pi: ExtensionAPI) {
       if (entry.type === "message" && entry.message.role === "toolResult")
         acknowledge(entry.message.details);
     }
-    if (process.env.HERDR_ENV === "1") {
+    if (
+      process.env.HERDR_ENV === "1" &&
+      pi.getActiveTools().includes("repo_agent_start")
+    ) {
       try {
         await refreshDiscovery(ctx);
       } catch (error) {
@@ -120,14 +150,17 @@ export default function extension(pi: ExtensionAPI) {
           `Repository discovery: ${String(error)}`,
         );
       }
-      timer = setTimeout(() => void monitor(ctx, generation), 1500);
-      timer.unref();
+      if (controller(ctx).lifecycle?.lease) {
+        timer = setTimeout(() => void monitor(ctx, generation), 1500);
+        timer.unref();
+      }
     }
   };
   pi.on("before_agent_start", async (event, ctx) => {
     const section = "pi_herdr_repository_coordination";
     delete event.systemPromptOptions.sections[section];
     if (
+      child.isChild() ||
       process.env.HERDR_ENV !== "1" ||
       !event.systemPromptOptions.selectedTools.includes("repo_agent_start")
     )
@@ -135,6 +168,10 @@ export default function extension(pi: ExtensionAPI) {
     try {
       const guidance = await refreshDiscovery(ctx);
       if (guidance) event.systemPromptOptions.sections[section] = guidance;
+      if (!timer && controller(ctx).lifecycle?.lease) {
+        timer = setTimeout(() => void monitor(ctx, generation), 1500);
+        timer.unref();
+      }
     } catch (error) {
       ctx.ui.setStatus(
         "repo-discovery",
@@ -143,7 +180,32 @@ export default function extension(pi: ExtensionAPI) {
     }
   });
   pi.on("session_start", begin);
-  pi.on("session_shutdown", stop);
+  pi.on("session_shutdown", async (event) => {
+    stop();
+    if (!child.isChild()) {
+      for (const client of controllers.values()) {
+        try {
+          if (event.reason === "quit") await client.release("quit");
+        } finally {
+          client.lifecycle?.close();
+          client.lifecycle = undefined;
+        }
+      }
+    }
+  });
+  const guardSessionChange = async (_event: unknown, ctx: ExtensionContext) => {
+    if (child.isChild() || handoffs.has(controller(ctx).root)) return;
+    const client = controller(ctx);
+    if (client.lifecycle?.lease && (await client.records()).length) {
+      ctx.ui.notify(
+        "Use /repo-agents fresh <handoff summary> to replace this conversation while keeping its children. Quit Pi to end the parent run.",
+        "warning",
+      );
+      return { cancel: true };
+    }
+  };
+  pi.on("session_before_switch", guardSessionChange);
+  pi.on("session_before_fork", guardSessionChange);
   const task = Type.String({
     minLength: 1,
     maxLength: 48000,
@@ -281,7 +343,104 @@ export default function extension(pi: ExtensionAPI) {
   );
   pi.registerCommand("repo-agents", {
     description: "List discovered repositories and managed Herdr agents",
-    handler: async (_args, ctx) => {
+    handler: async (args, ctx) => {
+      if (child.isChild()) {
+        ctx.ui.notify(
+          "This is a managed child; use its parent for coordination.",
+          "info",
+        );
+        return;
+      }
+      const [action, ...words] = args.trim().split(/\s+/);
+      if (action === "history" || action === "recover") {
+        const client = controller(ctx);
+        if (action === "recover" && !words.length) {
+          ctx.ui.notify(
+            "Use /repo-agents recover <relative repo path> after inspecting the interrupted child and its subprocesses.",
+            "warning",
+          );
+          return;
+        }
+        const data =
+          action === "history"
+            ? await client.history()
+            : await client.recover(words.join(" "));
+        pi.sendMessage({
+          customType: "repo-agents-lifecycle",
+          content: JSON.stringify(data, null, 2),
+          display: true,
+        });
+        return;
+      }
+      if (action === "fresh" || action === "continue") {
+        const summary = words.join(" ").trim();
+        if (!summary) {
+          ctx.ui.notify(
+            "Provide the goal, current decisions, unresolved issues and next steps after the command.",
+            "warning",
+          );
+          return;
+        }
+        if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+          ctx.ui.notify(
+            "Finish this main turn and queued messages before changing conversations.",
+            "warning",
+          );
+          return;
+        }
+        const client = controller(ctx);
+        if (action === "continue") {
+          const state = await client.connect({
+            handoff: true,
+            sessionFile: ctx.sessionManager.getSessionFile(),
+          });
+          if (!state.acquired) {
+            ctx.ui.notify(state.reason!, "warning");
+            return;
+          }
+          pi.sendMessage({
+            customType: "repo-agent-handoff",
+            content: summary,
+            display: true,
+          });
+          await begin({}, ctx);
+          return;
+        }
+        await client.requireOwnership();
+        const snapshot = await client.list();
+        await writeJSON(path.join(client.scope, "handoff.json"), {
+          summary,
+          snapshot,
+          fromSession: ctx.sessionManager.getSessionId(),
+          createdAt: new Date().toISOString(),
+        });
+        ctx.ui.notify(
+          "Starting a fresh main conversation; child processes and saved reports stay with this parent run.",
+          "info",
+        );
+        handoffs.set(client.root, {
+          fromSession: ctx.sessionManager.getSessionId(),
+          deliveryKeys: [...delivered],
+        });
+        stop();
+        try {
+          const switched = await ctx.newSession({
+            parentSession: ctx.sessionManager.getSessionFile(),
+            withSession: async (fresh) => {
+              await fresh.sendMessage({
+                customType: "repo-agent-handoff",
+                display: true,
+                details: { deliveryKeys: [...delivered] },
+                content: `Same parent process, fresh conversation. Follow applicable AGENTS.md.\nHandoff:\n${summary}\nRepository state at handoff (read current reports before acting):\n${JSON.stringify(snapshot)}`,
+              });
+            },
+          });
+          if (switched.cancelled) await begin({}, ctx);
+        } finally {
+          handoffs.delete(client.root);
+        }
+        return;
+      }
       const data = await controller(ctx).list();
       pi.sendMessage({
         customType: "repo-agents",

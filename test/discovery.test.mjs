@@ -27,6 +27,10 @@ async function setup(t, { inside = true, child = false } = {}) {
   const statuses = new Map();
   const messages = [];
   extension({
+    registerFlag() {},
+    getFlag: () => (child ? "child-launch" : undefined),
+    getActiveTools: () => ["repo_agent_start"],
+    setActiveTools() {},
     on: (name, handler) => handlers.set(name, handler),
     registerTool: (tool) => tools.push(tool),
     registerCommand: () => {},
@@ -35,7 +39,11 @@ async function setup(t, { inside = true, child = false } = {}) {
   const ctx = {
     cwd: root,
     ui: { setStatus: (key, value) => statuses.set(key, value) },
-    sessionManager: { getSessionId: () => "test-session", getBranch: () => [] },
+    sessionManager: {
+      getSessionId: () => "test-session",
+      getBranch: () => [],
+      getSessionFile: () => "/test/session",
+    },
   };
   t.after(async () => {
     await handlers.get("session_shutdown")?.({}, ctx);
@@ -54,9 +62,14 @@ test("startup discovers repositories without a user command, model call, or agen
   await handlers.get("session_start")({ reason: "startup" }, ctx);
   assert.match(statuses.get("repo-discovery"), /Repos: 1/);
   assert.equal(messages.length, 0);
-  await assert.rejects(fs.access(path.join(root, "agent-settings")), {
-    code: "ENOENT",
-  });
+  await fs.access(
+    path.join(
+      root,
+      "agent-settings",
+      "pi-herdr-multi-repo-subagents",
+      "lifecycle.sqlite",
+    ),
+  );
   const event = {
     systemPromptOptions: {
       selectedTools: ["repo_agent_start"],
@@ -109,12 +122,13 @@ test("automatic routing does not activate outside Herdr, in child sessions, or w
   event.systemPromptOptions.selectedTools = [];
   await handlers.get("before_agent_start")(event, ctx);
   assert.deepEqual(event.systemPromptOptions.sections, {});
-  process.env.PI_HERDR_CHILD_DIR = "/child";
-  extension({
-    on: () => assert.fail("child must not register orchestration handlers"),
-    registerTool: () =>
-      assert.fail("child must not register orchestration tools"),
-  });
+  const childFixture = await setup(t, { child: true });
+  event.systemPromptOptions.selectedTools = ["repo_agent_start"];
+  await childFixture.handlers.get("before_agent_start")(
+    event,
+    childFixture.ctx,
+  );
+  assert.deepEqual(event.systemPromptOptions.sections, {});
 });
 test("invalid discovery config does not break ordinary Pi turns", async (t) => {
   const { root, handlers, statuses, ctx } = await setup(t);

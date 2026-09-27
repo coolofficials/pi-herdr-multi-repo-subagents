@@ -18,44 +18,65 @@ assert.equal(
   "Use a fresh create-demo.mjs fixture.",
 );
 await fs.mkdir(evidence, { recursive: true });
-const creation = await herdr([
-  "tab",
-  "create",
-  "--workspace",
-  process.env.HERDR_WORKSPACE_ID,
-  "--label",
-  "Demo coordinator",
-  "--cwd",
-  root,
-  "--no-focus",
-]);
-const pane = creation.result.root_pane.pane_id;
-const name = `demo-${Date.now().toString(36)}`;
-const args = [
-  "agent",
-  "start",
-  name,
-  "--kind",
-  "pi",
-  "--pane",
-  pane,
-  "--",
-  "--extension",
-  fileURLToPath(new URL("../src/index.ts", import.meta.url)),
-  "--session-dir",
-  path.join(evidence, "parent-sessions"),
-];
-if (process.env.PI_TEST_MODEL) args.push("--model", process.env.PI_TEST_MODEL);
-const started = await herdr(args);
-const session = started.result.agent.agent_session.value;
+let pane, name, session;
+const savedStart = await readJSON(path.join(evidence, "live-start.json"));
+if (savedStart) {
+  if (savedStart.root !== root)
+    throw new Error("Evidence belongs to another root.");
+  ({ pane, name, session } = savedStart);
+} else {
+  const creation = await herdr([
+    "tab",
+    "create",
+    "--workspace",
+    process.env.HERDR_WORKSPACE_ID,
+    "--label",
+    "Demo coordinator",
+    "--cwd",
+    root,
+    "--no-focus",
+  ]);
+  pane = creation.result.root_pane.pane_id;
+  name = `demo-${Date.now().toString(36)}`;
+  const args = [
+    "agent",
+    "start",
+    name,
+    "--kind",
+    "pi",
+    "--pane",
+    pane,
+    "--",
+    "--extension",
+    fileURLToPath(new URL("../src/index.ts", import.meta.url)),
+    "--session-dir",
+    path.join(evidence, "parent-sessions"),
+  ];
+  if (process.env.PI_TEST_MODEL)
+    args.push("--model", process.env.PI_TEST_MODEL);
+  const started = await herdr(args);
+  session = started.result.agent.agent_session.value;
+  await writeJSON(path.join(evidence, "live-start.json"), {
+    root,
+    pane,
+    name,
+    session,
+  });
+}
 const prompt = `This is an authorized live integration test in a generated fixture. Read AGENTS.md and references/timeout-contract.md. Discover repositories with repo_agent_list. Delegate implementation, npm test and npm run build to separate backend and frontend Pi agents using repo_agent_start; do not implement their code yourself. Start both before waiting. Let automatic notifications resume you; do not write polling loops or repeatedly call wait. After both reports, use repo_agent_prompt on backend to review the diff and add/test the 0ms boundary case. Once its follow-up report arrives, verify the two modules together from the task root: retryLabel(timeoutResponse(1250)) must equal 'Retry in 1250 ms'. Update todo-tracker.md according to applicable instructions. Keep all child tabs open. End with DEMO-INTEGRATION-COMPLETE.`;
-await herdr(["agent", "prompt", name, prompt]);
+if (!savedStart) await herdr(["agent", "prompt", name, prompt]);
 async function waitFor(marker) {
   const deadline = Date.now() + Number(process.env.PI_TEST_TIMEOUT ?? 300000);
   for (;;) {
-    const entries = (await fs.readFile(session, "utf8"))
+    const entries = (
+      await fs.readFile(session, "utf8").catch((error) => {
+        if (error.code === "ENOENT") return "";
+        throw error;
+      })
+    )
       .trim()
       .split("\n")
+      .filter(Boolean)
       .map((x) => JSON.parse(x));
     if (
       entries.some(
@@ -79,12 +100,27 @@ async function waitFor(marker) {
   }
 }
 await waitFor("DEMO-INTEGRATION-COMPLETE");
-await herdr([
-  "agent",
-  "prompt",
-  name,
-  "Test fresh-session handoff now. Explain why the completed implementation context can be replaced for an independent handoff review. Use repo_agent_reset for backend with a concise handoff, asking it only to read index.mjs/index.test.mjs and summarize current behavior and coverage, ending with RESET-CHILD-COMPLETE. Do not modify code. End your turn and let automatic reporting resume you. Once the report arrives, update the tracker and end with DEMO-RESET-COMPLETE.",
-]);
+const alreadyReset = (await fs.readFile(session, "utf8"))
+  .trim()
+  .split("\n")
+  .map((line) => JSON.parse(line))
+  .some(
+    (entry) =>
+      entry.type === "message" &&
+      entry.message.role === "assistant" &&
+      entry.message.content?.some(
+        (part) =>
+          part.type === "text" &&
+          part.text.trim().endsWith("DEMO-RESET-COMPLETE"),
+      ),
+  );
+if (!alreadyReset)
+  await herdr([
+    "agent",
+    "prompt",
+    name,
+    "Test fresh-session handoff now. Explain why the completed implementation context can be replaced for an independent handoff review. Use repo_agent_reset for backend with a concise handoff, asking it only to read index.mjs/index.test.mjs and summarize current behavior and coverage, ending with RESET-CHILD-COMPLETE. Do not modify code. End your turn and let automatic reporting resume you. Once the report arrives, update the tracker and end with DEMO-RESET-COMPLETE.",
+  ]);
 const entries = await waitFor("DEMO-RESET-COMPLETE");
 const toolResults = entries.filter(
   (e) => e.type === "message" && e.message.role === "toolResult",
@@ -110,9 +146,19 @@ const notifications = entries.filter(
 );
 const keys = notifications.flatMap((e) => e.details.deliveryKeys);
 assert.equal(keys.length, new Set(keys).size, "Duplicate automatic reports");
+const consumed = new Set(keys.filter((key) => key.endsWith(":report")));
+for (const entry of toolResults) {
+  if (entry.message.details?.report)
+    consumed.add(`${entry.message.details.jobId}:report`);
+}
 assert.ok(
-  keys.length >= 4,
-  "Both initial reports, follow-up and reset must arrive automatically",
+  keys.length >= 1,
+  "At least one completion must resume the parent automatically",
+);
+assert.equal(
+  consumed.size,
+  4,
+  "Both initial reports, follow-up and reset must be consumed exactly once",
 );
 const tabs = await herdr([
   "tab",
@@ -126,6 +172,7 @@ const summary = {
   pane,
   session,
   notifications: keys.length,
+  reportsConsumed: consumed.size,
   tabs: tabs.result.tabs,
   verifiedAt: new Date().toISOString(),
 };

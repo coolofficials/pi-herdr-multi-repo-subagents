@@ -13,6 +13,9 @@ import {
   summarizeMessages,
 } from "../src/core.mjs";
 
+import { processIdentity } from "../src/lifecycle.mjs";
+const liveReady = { managed: true, instance: processIdentity() };
+
 async function fixture(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-herdr-test-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -95,11 +98,16 @@ async function controlled(t, opts = {}) {
         },
       };
     if (args[1] === "split") {
-      const dir = args[args.indexOf("--env") + 1].split("=").slice(1).join("=");
-      await writeJSON(path.join(dir, "ready.json"), { pid: process.pid });
       return { result: { pane: { pane_id: `w1:p${++n + 1}` } } };
     }
     if (args[1] === "start") {
+      const { dir } = JSON.parse(args[args.indexOf("--repo-agent-child") + 1]);
+      const launch = await readJSON(path.join(dir, "launch.json"));
+      await writeJSON(path.join(dir, "ready.json"), {
+        ...liveReady,
+        cwd: launch.cwd,
+        pane: launch.pane,
+      });
       live.set(args[2], {
         name: args[2],
         status: "idle",
@@ -208,9 +216,17 @@ test("concurrent starts cannot write competing registry entries", async (t) => {
 test("forget preserves active pane; unavailable reports remain readable", async (t) => {
   const { controller, live } = await controlled(t);
   const value = await controller.start({ repo: "repos/api", task: "test" });
-  await assert.rejects(controller.forget({ id: value.id }), /Exit the child/);
+  await assert.rejects(
+    controller.forget({ id: value.id }),
+    /exit was not cleanly/,
+  );
   live.delete(value.id);
   assert.equal((await controller.read({ id: value.id })).status, "unavailable");
+  const rec = await controller.record(value.id);
+  await writeJSON(path.join(rec.dir, "ready.json"), {
+    cleanExit: true,
+    instance: { ...processIdentity(), started: "different incarnation" },
+  });
   assert.equal((await controller.forget({ id: value.id })).status, "forgotten");
 });
 test("summary captures final answer only and usage, excludes thoughts and tool logs", () => {
@@ -243,10 +259,6 @@ test("tabs are default, independent starts both work and use distinct job identi
   controller.transport = async (args, opts) => {
     if (args[0] === "tab" && args[1] === "create") {
       calls.push(args);
-      const dir = args[args.indexOf("--env") + 1].slice(
-        "PI_HERDR_CHILD_DIR=".length,
-      );
-      await writeJSON(path.join(dir, "ready.json"), { pid: process.pid });
       return { result: { root_pane: { pane_id: `w1:p${calls.length + 10}` } } };
     }
     return transport(args, opts);
@@ -274,6 +286,7 @@ test("reset waits for idle and fresh session evidence, then submits a distinct t
     summary: "A done",
   });
   await writeJSON(path.join(rec.dir, "ready.json"), {
+    ...liveReady,
     sessionId: "old",
     sessionFile: "/old.jsonl",
   });
@@ -281,6 +294,7 @@ test("reset waits for idle and fresh session evidence, then submits a distinct t
   controller.transport = async (args, opts) => {
     if (args[1] === "prompt" && args[3] === "/new")
       await writeJSON(path.join(rec.dir, "ready.json"), {
+        ...liveReady,
         sessionId: "new",
         sessionFile: "/new.jsonl",
       });
@@ -317,7 +331,10 @@ test("reset tolerates Herdr unknown state while the fresh Pi session initializes
     status: "settled",
     summary: "done",
   });
-  await writeJSON(path.join(record.dir, "ready.json"), { sessionId: "old" });
+  await writeJSON(path.join(record.dir, "ready.json"), {
+    ...liveReady,
+    sessionId: "old",
+  });
   const transport = controller.transport;
   let resetting = false;
   let unknownCount = 0;
@@ -325,6 +342,7 @@ test("reset tolerates Herdr unknown state while the fresh Pi session initializes
     if (args[1] === "prompt" && args[3] === "/new") {
       resetting = true;
       await writeJSON(path.join(record.dir, "ready.json"), {
+        ...liveReady,
         sessionId: "new",
       });
     }
@@ -341,4 +359,42 @@ test("reset tolerates Herdr unknown state while the fresh Pi session initializes
   });
   assert.ok(unknownCount >= 3);
   assert.notEqual(next.jobId, started.jobId);
+});
+
+test("recovery refuses live child and preserves crash evidence after confirmed death", async (t) => {
+  const { controller, live } = await controlled(t);
+  const first = await controller.start({ repo: "repos/api", task: "work" });
+  const record = await controller.record(first.id);
+  await assert.rejects(controller.recover("repos/api"), /alive or unknown/);
+  live.delete(first.id);
+  await writeJSON(path.join(record.dir, "ready.json"), {
+    instance: { ...processIdentity(), started: "old incarnation" },
+  });
+  const recovered = await controller.recover("repos/api");
+  assert.equal(recovered.status, "recovered");
+  assert.equal((await controller.records()).length, 0);
+  assert.ok(await readJSON(path.join(record.dir, "recovered.json")));
+  assert.equal(controller.lifecycle.reservation(record.path), null);
+});
+
+test("detached child cannot be reset or receive follow-up", async (t) => {
+  const { controller } = await controlled(t);
+  const first = await controller.start({ repo: "repos/api", task: "work" });
+  const record = await controller.record(first.id);
+  await writeJSON(path.join(record.dir, `${first.jobId}.result.json`), {
+    status: "settled",
+    summary: "done",
+  });
+  await writeJSON(path.join(record.dir, "ready.json"), {
+    ...liveReady,
+    managed: false,
+  });
+  await assert.rejects(
+    controller.prompt({ id: first.id, task: "next" }),
+    /detached/,
+  );
+  await assert.rejects(
+    controller.reset({ id: first.id, task: "next", reason: "new task" }),
+    /detached/,
+  );
 });

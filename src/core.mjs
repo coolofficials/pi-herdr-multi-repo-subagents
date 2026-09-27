@@ -6,6 +6,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import {
+  Lifecycle,
+  inspectProcess,
+  liveness,
+  processIdentity,
+} from "./lifecycle.mjs";
 
 const exec = promisify(execFile);
 const hash = (value) =>
@@ -34,7 +40,7 @@ const sleep = (ms, signal) =>
   });
 export const MARKER = "PI_HERDR_TASK:";
 export const childExtension = fileURLToPath(
-  new URL("./child.ts", import.meta.url),
+  new URL("./index.ts", import.meta.url),
 );
 export async function readJSON(file, fallback = null) {
   try {
@@ -268,11 +274,16 @@ export class Controller {
     owner = "",
     env = process.env,
     transport = herdr,
+    identity = processIdentity(),
   }) {
     this.root = realpathSync(root);
     this.env = env;
     this.transport = transport;
     this.owner = owner;
+    this.sessionId = owner;
+    this.identity = identity;
+    /** @type {Lifecycle | undefined} */
+    this.lifecycle = undefined;
     this.queue = Promise.resolve();
     this.storage =
       storage ??
@@ -282,9 +293,50 @@ export class Controller {
       );
     this.scope = path.join(
       this.storage,
-      hash(`${this.root}\n${env.HERDR_SOCKET_PATH ?? ""}`),
+      "runs",
+      hash(this.root),
+      identity.token,
     );
     this.indexFile = path.join(this.scope, "agents.json");
+  }
+  async connect({ handoff = false, sessionFile = "" } = {}) {
+    this.lifecycle ??= new Lifecycle({
+      storage: this.storage,
+      root: this.root,
+      scope: this.scope,
+      env: this.env,
+      identity: this.identity,
+    });
+    const state = this.lifecycle.connect({
+      sessionId: this.sessionId,
+      sessionFile,
+      handoff,
+    });
+    if (state.acquired) {
+      this.owner = state.runId;
+      await writeJSON(path.join(this.scope, "parent.json"), state);
+    }
+    return state;
+  }
+  async requireOwnership() {
+    if (!this.lifecycle) {
+      const status = await this.connect();
+      if (!status.acquired) throw new Error(status.reason);
+    }
+    return this.lifecycle.assertOwned();
+  }
+  async release(reason) {
+    if (this.lifecycle?.release(reason)) {
+      const previous = await readJSON(path.join(this.scope, "parent.json"), {});
+      await writeJSON(path.join(this.scope, "parent.json"), {
+        ...previous,
+        runId: this.identity.token,
+        instance: this.identity,
+        status: "released",
+        reason,
+        updatedAt: new Date().toISOString(),
+      });
+    }
   }
   async call(args, signal, raw = false, timeout) {
     return this.transport(args, { env: this.env, signal, raw, timeout });
@@ -342,28 +394,151 @@ export class Controller {
           ? await readJSON(path.join(dir, `${jobId}.result.json`))
           : null;
         const activity = await readJSON(path.join(dir, "activity.json"));
+        const ready = await readJSON(path.join(dir, "ready.json"));
         return {
           id,
           repo,
           pane,
           jobId,
+          managed: ready?.managed ?? false,
+          exited: ready?.exited ?? false,
           status:
             report?.status ??
             (activity?.jobId === jobId ? activity.status : phase),
         };
       }),
     );
-    return { ...found, agents };
+    return { ...found, agents, coordinator: this.lifecycle?.status() };
   }
   async record(id) {
     const record = (await this.records()).find((x) => x.id === id);
     if (!record)
-      throw new Error("Unknown agent ID for this root and Herdr session.");
+      throw new Error("Unknown agent ID for this main Pi process and root.");
     return record;
+  }
+  async history() {
+    const directory = path.dirname(this.scope);
+    const entries = await fs
+      .readdir(directory, { withFileTypes: true })
+      .catch((error) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      });
+    const runs = [];
+    for (const entry of entries.filter((entry) => entry.isDirectory())) {
+      const scope = path.join(directory, entry.name);
+      const parent = await readJSON(path.join(scope, "parent.json"));
+      runs.push({
+        runId: entry.name,
+        current: scope === this.scope,
+        parent,
+        parentProcess: parent?.instance ? liveness(parent.instance) : "unknown",
+        directory: scope,
+        agents: await readJSON(path.join(scope, "agents.json"), []),
+      });
+    }
+    runs.sort((a, b) =>
+      (b.parent?.updatedAt ?? "").localeCompare(a.parent?.updatedAt ?? ""),
+    );
+    return {
+      root: this.root,
+      runs: runs.slice(0, 50),
+      truncated: runs.length > 50,
+    };
+  }
+  async guardLegacy(checkout) {
+    const entries = await fs.readdir(this.storage, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^[a-f0-9]{20}$/.test(entry.name)) continue;
+      const records = await readJSON(
+        path.join(this.storage, entry.name, "agents.json"),
+        [],
+      );
+      for (const record of records.filter(
+        (record) => record.path === checkout,
+      )) {
+        const ready = await readJSON(path.join(record.dir, "ready.json"));
+        if (!ready?.pid || inspectProcess(ready.pid).status !== "dead")
+          throw new Error(
+            `Legacy agent ${record.id} may still own this checkout. Exit and forget it using the previous version before starting managed work here.`,
+          );
+      }
+    }
+  }
+  async recover(repo, signal) {
+    await this.requireOwnership();
+    return this.locked(async () => {
+      const selected = await resolveRepo(this.root, repo);
+      const held = this.lifecycle.reservation(selected.path);
+      if (!held) {
+        const records = await this.records();
+        const record = records.find((record) => record.path === selected.path);
+        if (record && (await readJSON(path.join(record.dir, "recovered.json"))))
+          await writeJSON(
+            this.indexFile,
+            records.filter((item) => item.id !== record.id),
+          );
+        return { repo, status: "not-reserved" };
+      }
+      const parent = await readJSON(
+        path.join(path.dirname(held.dir), "parent.json"),
+      );
+      if (
+        parent?.instance?.token !== this.identity.token &&
+        liveness(parent?.instance) !== "dead"
+      )
+        throw new Error(
+          "The previous parent is alive or unknown. Recovery cannot take ownership from it.",
+        );
+      const launch = await readJSON(path.join(held.dir, "launch.json"));
+      const ready = await readJSON(path.join(held.dir, "ready.json"));
+      const claim = await readJSON(path.join(held.dir, "claim.json"));
+      const identity = ready?.instance ?? claim;
+      if (identity && liveness(identity) !== "dead")
+        throw new Error(
+          "The child process is alive or unknown. Finish or exit it before recovery.",
+        );
+      if (launch && !identity && Date.now() <= launch.expiresAt)
+        throw new Error(
+          "The launch window is still open. Wait for it to expire before recovering an uninitialized child.",
+        );
+      if (launch?.socket && launch.socket !== this.env.HERDR_SOCKET_PATH)
+        throw new Error(
+          "Inspect and recover this checkout from its original Herdr server.",
+        );
+      const response = await this.call(["agent", "list"], signal);
+      const agents = response.result?.agents;
+      if (!Array.isArray(agents))
+        throw new Error("Cannot inspect Herdr agents safely.");
+      if (
+        agents.some(
+          (agent) =>
+            agent.name === held.agentId ||
+            (launch?.pane && agent.pane_id === launch.pane),
+        )
+      )
+        throw new Error(
+          "Herdr still reports an agent in the retained pane. Inspect and exit it before recovery.",
+        );
+      await writeJSON(path.join(held.dir, "recovered.json"), {
+        recoveredBy: this.identity.token,
+        recoveredAt: new Date().toISOString(),
+      });
+      // Release first: if registry cleanup fails, retrying can still repair it.
+      this.lifecycle.unreserve(selected.path, held.agentId);
+      if (path.dirname(held.dir) === this.scope)
+        await writeJSON(
+          this.indexFile,
+          (await this.records()).filter((record) => record.id !== held.agentId),
+        );
+      return { repo, status: "recovered", retained: held.dir };
+    });
   }
   async start({ repo, task, context = "", model, thinking }, signal) {
     validateWork(task, context);
+    await this.requireOwnership();
     return this.locked(async () => {
+      this.lifecycle.assertOwned();
       const config = await loadConfig(this.root);
       const found = await discoverRepos(this.root, config);
       const selected = await resolveRepo(this.root, repo);
@@ -377,6 +552,7 @@ export class Controller {
         throw new Error(
           `Repository already has agent ${existing.id}. Use repo_agent_prompt, or forget it after exiting its Pi session.`,
         );
+      await this.guardLegacy(selected.path);
       await this.call(["status"], signal, true);
       const layout = await this.call(["pane", "layout", "--current"], signal);
       const rect = layout.result?.layout?.panes?.find(
@@ -390,51 +566,80 @@ export class Controller {
       const id = `repo-${randomUUID().slice(0, 12)}`;
       const dir = path.join(this.scope, id);
       await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-      const split = await this.call(
-        config.layout === "split"
-          ? [
-              "pane",
-              "split",
-              "--current",
-              "--direction",
-              direction,
-              "--cwd",
-              selected.path,
-              "--env",
-              `PI_HERDR_CHILD_DIR=${dir}`,
-              "--no-focus",
-            ]
-          : [
-              "tab",
-              "create",
-              "--workspace",
-              this.env.HERDR_WORKSPACE_ID,
-              "--label",
-              selected.repo,
-              "--cwd",
-              selected.path,
-              "--env",
-              `PI_HERDR_CHILD_DIR=${dir}`,
-              "--no-focus",
-            ],
-        signal,
-      );
+      const launchToken = randomUUID();
+      const record = {
+        id,
+        ...selected,
+        dir,
+        owner: this.owner,
+        phase: "creating-pane",
+        createdAt: new Date().toISOString(),
+      };
+      this.lifecycle.reserve(selected.path, { agentId: id, dir });
+      records.push(record);
+      await writeJSON(this.indexFile, records);
+      let split;
+      try {
+        const childEnvironment = this.env.PI_CODING_AGENT_DIR
+          ? ["--env", `PI_CODING_AGENT_DIR=${this.env.PI_CODING_AGENT_DIR}`]
+          : [];
+        split = await this.call(
+          config.layout === "split"
+            ? [
+                "pane",
+                "split",
+                "--current",
+                "--direction",
+                direction,
+                "--cwd",
+                selected.path,
+                ...childEnvironment,
+                "--no-focus",
+              ]
+            : [
+                "tab",
+                "create",
+                "--workspace",
+                this.env.HERDR_WORKSPACE_ID,
+                "--label",
+                selected.repo,
+                "--cwd",
+                selected.path,
+                ...childEnvironment,
+                "--no-focus",
+              ],
+          signal,
+        );
+      } catch (error) {
+        record.phase = "pane-creation-uncertain";
+        record.lastError = error.message;
+        await writeJSON(this.indexFile, records);
+        throw new Error(
+          `${error.message}\nPane creation is uncertain; retained agent ${id}. Inspect before retrying.`,
+        );
+      }
       const pane =
         split.result?.pane?.pane_id ?? split.result?.root_pane?.pane_id;
       if (!pane)
         throw new Error(
           "Herdr layout creation returned no pane ID. Inspect the session before retrying.",
         );
-      const record = {
-        id,
-        ...selected,
-        pane,
-        dir,
-        phase: "starting",
-        createdAt: new Date().toISOString(),
-      };
-      records.push(record);
+      record.pane = pane;
+      record.phase = "starting";
       await writeJSON(this.indexFile, records);
+      await writeJSON(path.join(dir, "launch.json"), {
+        token: launchToken,
+        pane,
+        socket: this.env.HERDR_SOCKET_PATH,
+        cwd: selected.path,
+        root: this.root,
+        scope: this.scope,
+        storage: this.storage,
+        workflowId: this.owner,
+        expiresAt: Date.now() + 120000,
+        parent: this.identity,
+        agentId: id,
+      });
       const args = [
         "agent",
         "start",
@@ -448,6 +653,8 @@ export class Controller {
         "--",
         "--extension",
         childExtension,
+        "--repo-agent-child",
+        JSON.stringify({ dir, token: launchToken }),
         "--name",
         `repo: ${selected.repo}`,
         "--session-dir",
@@ -466,6 +673,13 @@ export class Controller {
             );
           await sleep(100, signal);
         }
+        const ready = await readJSON(path.join(dir, "ready.json"));
+        if (
+          !ready.managed ||
+          ready.pane !== pane ||
+          ready.cwd !== selected.path
+        )
+          throw new Error("Child identity did not match the launch request.");
         record.phase = "ready";
         await writeJSON(this.indexFile, records);
         return await this.submit(record, records, task, context, signal);
@@ -481,6 +695,16 @@ export class Controller {
   }
   async submit(record, records, task, context, signal) {
     validateWork(task, context);
+    this.lifecycle.assertOwned();
+    const ready = await readJSON(path.join(record.dir, "ready.json"));
+    if (!ready?.managed)
+      throw new Error(
+        "Child is detached, legacy, or not initialized. Do not submit work to this session.",
+      );
+    if (liveness(ready.instance) !== "alive")
+      throw new Error(
+        "Child process identity is unavailable; inspect it before submitting work.",
+      );
     const live = await this.call(["agent", "get", record.id], signal);
     const state =
       live.result?.agent?.status ?? live.result?.agent?.agent_status;
@@ -493,6 +717,8 @@ export class Controller {
       jobId,
       task,
       context,
+      owner: this.owner,
+      epoch: this.lifecycle.lease.epoch,
     });
     record.jobId = jobId;
     record.owner = this.owner;
@@ -519,7 +745,9 @@ export class Controller {
     };
   }
   async prompt({ id, task, context = "" }, signal) {
+    await this.requireOwnership();
     return this.locked(async () => {
+      this.lifecycle.assertOwned();
       const records = await this.records();
       const record = records.find((r) => r.id === id);
       if (!record) throw new Error("Unknown agent ID.");
@@ -539,6 +767,10 @@ export class Controller {
       ? await readJSON(path.join(record.dir, `${record.jobId}.result.json`))
       : null;
     const activity = await readJSON(path.join(record.dir, "activity.json"));
+    const ready = await readJSON(path.join(record.dir, "ready.json"));
+    const parent = await readJSON(
+      path.join(record.dir, "parent-observation.json"),
+    );
     let live, liveError;
     try {
       live = (await this.call(["agent", "get", id], signal)).result?.agent;
@@ -546,15 +778,22 @@ export class Controller {
       liveError = e.message;
     }
     const liveState = live?.status ?? live?.agent_status ?? "unavailable";
+    const processStatus = ready?.instance
+      ? liveness(ready.instance)
+      : "unknown";
     const status =
       report?.status ??
-      (liveState === "blocked"
-        ? "blocked"
-        : !live
-          ? "unavailable"
-          : activity?.jobId === record.jobId
-            ? activity.status
-            : record.phase);
+      (processStatus === "dead"
+        ? "interrupted"
+        : ready && !ready.managed
+          ? "detached"
+          : liveState === "blocked"
+            ? "blocked"
+            : !live
+              ? "unavailable"
+              : activity?.jobId === record.jobId
+                ? activity.status
+                : record.phase);
     const result = {
       id,
       repo: record.repo,
@@ -563,6 +802,9 @@ export class Controller {
       status,
       liveState,
       liveError,
+      managed: ready?.managed ?? false,
+      processStatus,
+      parentConnection: parent?.status,
       report: report
         ? {
             ...report,
@@ -584,7 +826,12 @@ export class Controller {
     const deadline = Date.now() + Math.max(1, Math.min(timeout, 60)) * 1000;
     for (;;) {
       const result = await this.read({ id }, signal);
-      if (result.report || ["blocked", "unavailable"].includes(result.status))
+      if (
+        result.report ||
+        ["blocked", "unavailable", "interrupted", "detached"].includes(
+          result.status,
+        )
+      )
         return result;
       if (Date.now() >= deadline) return { ...result, timedOut: true };
       await sleep(Math.min(1000, Math.max(1, deadline - Date.now())), signal);
@@ -594,7 +841,9 @@ export class Controller {
     validateWork(task, context);
     if (!reason?.trim())
       throw new Error("Explain why a fresh session is useful.");
+    await this.requireOwnership();
     return this.locked(async () => {
+      this.lifecycle.assertOwned();
       const records = await this.records();
       const record = records.find((r) => r.id === id);
       if (!record) throw new Error("Unknown agent ID.");
@@ -608,6 +857,10 @@ export class Controller {
       if (!["idle", "done"].includes(live?.status ?? live?.agent_status))
         throw new Error("Child must be idle before resetting.");
       const previous = await readJSON(path.join(record.dir, "ready.json"));
+      if (!previous?.managed || liveness(previous.instance) !== "alive")
+        throw new Error(
+          "Child is detached, exited or unknown; it cannot be reset by this parent.",
+        );
       record.phase = "resetting";
       await writeJSON(this.indexFile, records);
       await this.call(["agent", "prompt", id, "/new"], signal);
@@ -641,8 +894,23 @@ export class Controller {
     });
   }
   async forget({ id }, signal) {
+    await this.requireOwnership();
     return this.locked(async () => {
+      this.lifecycle.assertOwned();
       const record = await this.record(id);
+      if (!record.pane)
+        throw new Error(
+          "Pane creation was uncertain. Resolve the retained launch before forgetting it.",
+        );
+      const ready = await readJSON(path.join(record.dir, "ready.json"));
+      if (!ready?.cleanExit || !ready.instance)
+        throw new Error(
+          "Child exit was not cleanly recorded. Inspect it, then use /repo-agents recover <relative repo path>.",
+        );
+      if (liveness(ready.instance) !== "dead")
+        throw new Error(
+          "Child process is alive or unknown. Exit the child Pi session first.",
+        );
       const response = await this.call(["agent", "list"], signal);
       const agents = response.result?.agents;
       if (!Array.isArray(agents))
@@ -651,6 +919,7 @@ export class Controller {
         throw new Error(
           "Exit the child Pi session first. Its pane and logs will remain.",
         );
+      this.lifecycle.unreserve(record.path, record.id);
       await writeJSON(
         this.indexFile,
         (await this.records()).filter((r) => r.id !== id),

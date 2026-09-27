@@ -1,6 +1,6 @@
 # pi-herdr-multi-repo-subagents
 
-Delegate repository work from a task-root Pi session to independent Pi sessions in visible Herdr tabs. Child reports automatically return to the coordinator. Each child starts in its repository and loads the applicable AGENTS.md files normally.
+Delegate repository work from a task-root Pi process to its own child Pi sessions in visible Herdr tabs. Child reports automatically return to the coordinator. Each child starts in its repository and loads the applicable AGENTS.md files normally.
 
 ## Requirements and installation
 
@@ -56,7 +56,7 @@ Paths are literal paths relative to the root, not globs. `include` replaces auto
 ## Interaction
 
 - A delegated repository gets its own tab by default; focus stays with the user. Split layout is optional.
-- One managed child per repository, shared across coordinator sessions in the same task root and Herdr server. Independent repositories can work concurrently. Concurrent launch operations are serialized briefly while the panes start.
+- Each main Pi process owns its own children. One managed main owns a canonical task root within a Pi profile; other main processes cannot submit work for that root. Each checkout has one managed child reservation across roots in that profile. Independent repositories can work concurrently. A newly started main never adopts a previous main's children, even when resuming the same conversation.
 - The coordinator passes a bounded task and relevant context, not its full conversation. AGENTS.md supplies language, project policies and conventions. Instructions that existed only in the parent conversation must be explicitly passed.
 - Completion reports automatically wake the owning coordinator. There is no model invocation for periodic local status inspection. Finishing several children may still cause multiple coordinator turns; context isolation does not guarantee lower total cost.
 - The child remains open for direct inspection and follow-up work. The coordinator normally reuses its session. If a completed task has accumulated irrelevant context or the objective changes, the coordinator explains why and can start a fresh session in the same tab with a concise handoff. Previous session files remain available.
@@ -74,13 +74,38 @@ Paths are literal paths relative to the root, not globs. `include` replaces auto
 
 Reports are captured at Pi's `agent_settled` event, after automatic retries and continuations. `settled` means the turn ended; the coordinator must inspect the answer and actual checks before claiming the task succeeded. Reports have job IDs, final text, token usage, error/outcome, and the original session path. Model-facing summaries are capped at 12,000 characters with a path to the full report. Tool logs and hidden reasoning are not copied into the report.
 
+## Session lifecycle
+
+Version 0.3.0 adds process-owned parent families. Restart existing Pi processes after updating; v0.2.0 children are not adopted. The lifecycle is covered by automated tests and the real-Herdr verification scripts below.
+
+| Event                                                           | Behavior                                                                                                              |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Close the Herdr UI while the main Pi process remains alive      | Keep children and their work running.                                                                                 |
+| Main Pi exits, normally or by a confirmed process death         | Idle children exit. Busy children finish the accepted request, save its report, then exit. New requests are rejected. |
+| Parent liveness cannot be determined                            | Retain children and show an unknown-state indicator.                                                                  |
+| Compact or reload the main conversation in the same process     | Preserve ownership and child sessions.                                                                                |
+| Start a fresh main conversation through the handoff command     | Preserve children; carry a concise handoff and report acknowledgements.                                               |
+| Start a new Pi process, including resume of an old conversation | Create a new parent family. Previous reports remain readable; previous children are never adopted.                    |
+| A previous parent's child is still finishing                    | Keep its checkout reserved until it exits.                                                                            |
+| Start ordinary Pi again in a former child pane                  | Start ordinary Pi. The child role is a one-use process launch argument, not a shell environment variable.             |
+
+Parent checks run locally every two seconds. Normal main shutdown records its intent; abrupt exits are detected by PID, process start time and host. A timer does not imply an exact shutdown deadline. Blocked tools, approvals, provider errors, or a hung child can require manual attention. The extension does not force-kill unfinished work after a timeout. If the PC shuts down or the child is also killed, completing its request is not guaranteed.
+
+`/repo-agents fresh <handoff summary>` starts a fresh conversation in the same main process. Include the goal, decisions, unresolved issues and next steps. Native conversation switching is guarded while child records remain, so ownership cannot silently move into an unrelated conversation. `/repo-agents continue <handoff summary>` repairs a same-process conversation handoff; it cannot take over another live main. Compaction does not require either command.
+
+`/repo-agent-detach` in an idle child explicitly keeps that Pi process independent of parent exit. Its checkout remains reserved until it exits. The parent can no longer prompt or reset it. No automatic detachment occurs.
+
 ## Recovery and scope
 
-A timeout or failed prompt submission may occur after text was delivered. The extension retains the registry entry and pane and does not resubmit automatically. Inspect with `repo_agent_read` and `logs: true`. Resolve an interactive trust/login question directly in the child tab. If startup failed before the child initialized, exit any partial child, forget the entry, and start again. If a pane was closed, forgetting the entry allows a new child to start.
+A timeout or failed prompt submission may occur after text was delivered. The extension retains the registry entry and pane and does not resubmit automatically. Inspect with `repo_agent_read` and `logs: true`. Resolve trust/login questions directly in the child tab. A completed report describes a settled turn, not necessarily a successful task.
 
-State and child sessions live below `<Pi agent directory>/pi-herdr-multi-repo-subagents/`, partitioned by task root and Herdr socket. They are not placed inside the code repositories. Parent reload/resume can recover registry entries and reports. Automatic notifications belong to the parent session that submitted the task; another parent can inspect existing agents and take ownership by sending the next task. Completed reports and old sessions are retained; removing the package does not delete them.
+A cleanly exited child can be forgotten with `repo_agent_forget`. Its pane, reports and session files remain. A later parent may reserve that checkout after the old child process is confirmed dead. For interrupted launches or crashes, inspect the child pane and any commands it launched, then use `/repo-agents recover <relative repo path>`. Recovery checks parent and child process identities, launch expiry and the Herdr agent list; it refuses a live or unknown child and never kills processes. Recovery releases the reservation and preserves evidence. It does not resume or replay interrupted work. Unregistered background commands must be inspected separately.
 
-This is coordination, not an OS sandbox. Every child has normal Pi filesystem, credential and tool access. Repository scope is validated for launching and described in the task; it does not prevent a child from accessing other paths. The extension never fabricates Herdr caller context and never controls another user's focused pane implicitly.
+`/repo-agents history` lists up to 50 parent runs for the current root, with report directories and retained agent/job IDs. It is read-only and does not adopt agents or wake a new model turn. Each agent directory contains `<jobId>.result.json` reports and session files. Older results remain available even after the parent exits.
+
+State lives under `<Pi agent directory>/pi-herdr-multi-repo-subagents/`: a local SQLite ownership database and `runs/<root hash>/<parent run ID>/` files. It is outside code repositories. The supported storage is a local filesystem on one machine. Different Pi profiles have separate coordination databases; do not run them concurrently against the same checkout. A different Herdr server does not bypass checkout reservations within one profile. Previous v0.2.0 agents are not migrated: exit and forget them using that version before using this version on those checkouts.
+
+This is coordination, not an OS sandbox. Every child has normal Pi filesystem, credential and tool access. Repository scope is validated for launching and described in the task; it does not prevent access to other paths or prevent manually launched processes from editing the checkout. The extension never fabricates Herdr caller context. Removing the package does not delete retained reports or session files.
 
 ## Development and distribution
 
@@ -114,3 +139,11 @@ npm run test:live -- /absolute/path/to/new-demo-project/DEMO-001-shared-timeout 
 ```
 
 This invokes your authenticated Pi model and uses its allowance/billing. It leaves the demo tabs open. `PI_TEST_MODEL` optionally selects a model; `PI_TEST_TIMEOUT` changes the per-stage timeout (default 300,000 ms).
+
+After the integration test completes, run the lifecycle checks in the same test Herdr session:
+
+```sh
+node scripts/test-lifecycle-live.mjs /absolute/path/to/evidence
+```
+
+Use a dedicated named Herdr session and a generated fixture. This test starts actual Pi processes with the installed package, exercises conversation handoff and duplicate ownership, kills its recorded test parent to simulate a crash, and checks idle exit, busy completion, new-parent isolation, normal shutdown and ordinary Pi reuse of a child pane. It invokes the configured model and retains evidence. Never point it at a working project.
