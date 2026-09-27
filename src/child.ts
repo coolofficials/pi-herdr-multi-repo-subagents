@@ -1,16 +1,24 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import {
   CHILD_TOOLS,
+  LEAD_TOOLS,
   READ_ONLY_ROLES,
   roleGuidance,
   roleName,
   validateBrief,
 } from "./contracts.mjs";
 import { inspectSource, fetchSource } from "./access.mjs";
-import { reviewChanges, snapshot } from "./workflow.mjs";
+import {
+  inspectHierarchyReview,
+  validateReviewTarget,
+  validateLeadCompletion,
+  getWork,
+  recordDirectInput,
+} from "./hierarchy.mjs";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -29,8 +37,9 @@ export default function childBridge(pi: ExtensionAPI) {
   const isChild = () => typeof pi.getFlag(CHILD_FLAG) === "string";
   let dir: string | undefined;
   let launch: any;
+  let coordinator: any;
   let request: any;
-  let role = "explorer";
+  let role = "scout";
   let normalTools: string[] = [];
   let jobId: string | undefined;
   let messages: AgentMessage[] = [];
@@ -79,19 +88,28 @@ export default function childBridge(pi: ExtensionAPI) {
         brief = undefined;
       }
     }
+    if (role === "task_lead" && !brief && !forced && outcome === "completed")
+      return;
+    let taskApproval = submitted?.taskApproval;
+    if (role === "task_lead" && brief?.outcome === "completed") {
+      try {
+        taskApproval = await validateLeadCompletion(
+          launch.workScope,
+          request.bundle,
+        );
+      } catch {
+        brief = validateBrief({
+          outcome: "incomplete",
+          summary: "Task approval changed before completion report settled.",
+          risks: ["Reconcile task state and review again before completion."],
+        });
+        taskApproval = undefined;
+      }
+    }
     let review = submitted?.review;
     if (review && brief?.verdict === "pass") {
       try {
-        if ((await snapshot(launch.cwd)).fingerprint !== review.target) {
-          brief = validateBrief({
-            outcome: "incomplete",
-            summary:
-              "Review target changed before the turn settled; the prior PASS is invalid.",
-            risks: ["Reconcile the new code state before reviewing again."],
-            verdict: "unknown",
-          });
-          review = { ...review, invalidated: true };
-        }
+        await validateReviewTarget(request, dir, id);
       } catch {
         brief = validateBrief({
           outcome: "incomplete",
@@ -114,6 +132,7 @@ export default function childBridge(pi: ExtensionAPI) {
         ...report,
         brief,
         review,
+        taskApproval,
         role,
         bundle: request?.bundle,
         sessionFile: ctx.sessionManager.getSessionFile(),
@@ -134,6 +153,16 @@ export default function childBridge(pi: ExtensionAPI) {
       state.status === "released" &&
       state.reason === "quit";
     if (physical === "dead" || quit) parentGone = true;
+    for (const ancestor of launch.ancestors ?? []) {
+      const state = await readJSON(path.join(ancestor.scope, "parent.json"));
+      if (
+        liveness(ancestor.identity) === "dead" ||
+        (state?.instance?.token === ancestor.identity.token &&
+          state.status === "released" &&
+          state.reason === "quit")
+      )
+        parentGone = true;
+    }
     const status = parentGone
       ? "exited"
       : physical === "alive"
@@ -145,7 +174,7 @@ export default function childBridge(pi: ExtensionAPI) {
     });
     return status;
   };
-  const maybeExit = (ctx: ExtensionContext) => {
+  const maybeExit = async (ctx: ExtensionContext) => {
     if (
       parentGone &&
       !detached &&
@@ -154,6 +183,16 @@ export default function childBridge(pi: ExtensionAPI) {
       ctx.isIdle() &&
       !ctx.hasPendingMessages()
     ) {
+      if (role === "task_lead" && coordinator) {
+        for (const child of await coordinator.records()) {
+          const req = await readJSON(path.join(child.dir, "request.json"));
+          if (
+            req &&
+            !(await readJSON(path.join(child.dir, `${req.jobId}.result.json`)))
+          )
+            return;
+        }
+      }
       closing = true;
       ctx.shutdown();
     }
@@ -171,7 +210,28 @@ export default function childBridge(pi: ExtensionAPI) {
             ? "Parent state unknown · retained"
             : undefined,
       );
-      maybeExit(ctx);
+      if (
+        parentGone &&
+        role === "task_lead" &&
+        coordinator &&
+        ctx.isIdle() &&
+        !ctx.hasPendingMessages()
+      ) {
+        await coordinator.release("quit");
+        const children = await coordinator.records();
+        let settled = true;
+        for (const child of children) {
+          const req = await readJSON(path.join(child.dir, "request.json"));
+          if (
+            req &&
+            !(await readJSON(path.join(child.dir, `${req.jobId}.result.json`)))
+          )
+            settled = false;
+        }
+        if (settled) await finish(ctx, "aborted");
+      }
+      if (await readJSON(path.join(dir!, "retired.json"))) parentGone = true;
+      await maybeExit(ctx);
     } catch (error) {
       if (version === generation)
         ctx.ui.setStatus(
@@ -191,13 +251,18 @@ export default function childBridge(pi: ExtensionAPI) {
   const allowed = () => {
     if (detached)
       return normalTools.filter((name) => !name.startsWith("repo_"));
+    if (role === "task_lead") return [...LEAD_TOOLS];
     if (!READ_ONLY_ROLES.has(role))
-      return normalTools.filter((name) => name !== "repo_review_changes");
+      return jobId
+        ? normalTools.filter(
+            (name) => !["repo_review_changes", "repo_task_note"].includes(name),
+          )
+        : ["repo_source"];
     return [
       "repo_source",
       "repo_agent_report",
-      ...(role === "librarian" ? ["repo_research_fetch"] : []),
-      ...(role === "reviewer" ? ["repo_review_changes"] : []),
+      ...(role === "researcher" ? ["repo_research_fetch"] : []),
+      ...(["reviewer", "oracle"].includes(role) ? ["repo_review_changes"] : []),
     ];
   };
   const applyRole = () => {
@@ -223,15 +288,55 @@ export default function childBridge(pi: ExtensionAPI) {
     content: [{ type: "text" as const, text: JSON.stringify(value) }],
     details: value,
   });
-  pi.on("before_agent_start", (event, ctx) => {
+  const resumeLead = async () => {
+    if (role !== "task_lead" || jobId || !coordinator || parentGone || detached)
+      return;
+    await coordinator.locked(async () => {
+      const work = await getWork(launch.workScope, launch.bundle);
+      if (work.status === "completed") return;
+      const prior = await readJSON(path.join(dir!, "request.json"));
+      if (!prior) throw new Error("Task Lead has no assigned request.");
+      const next = {
+        ...prior,
+        jobId: randomUUID(),
+        task: "Continue assigned task from local input/child results",
+        context: "",
+        contract: {
+          ...prior.contract,
+          requirements: work.requirements,
+          requirementsRevision: work.revision,
+          notes: work.notes,
+        },
+      };
+      const index = path.join(launch.scope, "agents.json");
+      const records = await readJSON(index, []),
+        record = records.find((r: any) => r.id === launch.agentId);
+      if (!record)
+        throw new Error("Task Lead no longer belongs to its parent.");
+      record.jobId = next.jobId;
+      record.phase = "submitted";
+      await writeJSON(path.join(dir!, "request.json"), next);
+      await writeJSON(index, records);
+      setRequest(next);
+      jobId = next.jobId;
+      messages = [];
+      outcome = "completed";
+      await checkpoint();
+    });
+  };
+  pi.on("before_agent_start", async (event, ctx) => {
     if (!isChild() || detached) return;
+    await resumeLead();
     applyRole();
     event.systemPromptOptions.selectedTools = allowed();
     event.systemPromptOptions.sections.pi_repo_role = roleGuidance(role);
     if (!jobId)
       event.systemPromptOptions.sections.pi_repo_role +=
-        "\nThere is no delegated job. Answer direct user questions in this pane; do not submit a parent report or claim bundle completion.";
-    ctx.ui.setStatus("repo-role", `${role} · ${request?.bundle ?? "research"}`);
+        "\nThere is no delegated job. Answer questions only; do not modify artifacts, submit a parent report or claim bundle completion. Direct refinements belong in Task Lead pane.";
+    ctx.ui.setStatus(
+      "repo-role",
+      launch.label ?? `${role} · ${request?.bundle ?? "research"}`,
+    );
   });
   pi.on("tool_call", async (event) => {
     if (!isChild() || detached) return;
@@ -265,6 +370,10 @@ export default function childBridge(pi: ExtensionAPI) {
       }),
       async execute(_call, params) {
         requireScope();
+        if (role === "task_lead")
+          throw new Error(
+            "Task Lead plans from reports; source access is unavailable.",
+          );
         return result(
           await inspectSource(
             params.scope === "task" ? launch.root : launch.cwd,
@@ -283,7 +392,7 @@ export default function childBridge(pi: ExtensionAPI) {
       parameters: Type.Object({ url: Type.String({ maxLength: 2000 }) }),
       async execute(_call, params, signal) {
         requireScope();
-        if (!["librarian", "implementer", "verifier"].includes(role))
+        if (!["researcher", "implementer"].includes(role))
           throw new Error("External retrieval is not enabled for this role.");
         return result(await fetchSource(params.url, signal));
       },
@@ -296,6 +405,25 @@ export default function childBridge(pi: ExtensionAPI) {
       description:
         "List all changed paths against the saved pre-implementation baseline, or retrieve bounded before/after text for one changed file. File offsets are characters. since=previous_review isolates remediation; baseline (default) shows the whole bundle. Verify the target fingerprint; include surrounding code with repo_source. Inspect all relevant changes before submitting a verdict.",
       parameters: Type.Object({
+        evidenceTask: Type.Optional(
+          Type.String({
+            description:
+              "Oracle: task ID from review roster to read its approval evidence.",
+          }),
+        ),
+        section: Type.Optional(
+          Type.Union([
+            Type.Literal("requirements"),
+            Type.Literal("notes"),
+            Type.Literal("brief"),
+          ]),
+        ),
+        repo: Type.Optional(
+          Type.String({
+            description:
+              "Relative repository path from the assigned review roster. Omit to list repositories.",
+          }),
+        ),
         file: Type.Optional(Type.String()),
         since: Type.Optional(
           Type.Union([
@@ -307,13 +435,40 @@ export default function childBridge(pi: ExtensionAPI) {
       }),
       async execute(_call, params) {
         const work = activeRequest();
-        if (role !== "reviewer")
-          throw new Error("Only the reviewer may inspect this change.");
-        const inspected = await reviewChanges(work, launch.cwd, params);
-        await writeJSON(path.join(dir!, `${jobId}.inspection.json`), {
-          target: inspected.fingerprint,
-          inspectedAt: new Date().toISOString(),
-        });
+        if (!["reviewer", "oracle"].includes(role))
+          throw new Error(
+            "Only an independent reviewer/oracle may inspect changes.",
+          );
+        const inspected = await inspectHierarchyReview(work, params);
+        if (params.repo && "fingerprint" in inspected) {
+          const evidence = await readJSON(
+            path.join(dir!, `${jobId}.inspection.json`),
+            {},
+          );
+          const entry = (evidence[params.repo] ??= {
+            target: inspected.fingerprint,
+            files: {},
+          });
+          if (
+            params.file &&
+            "nextOffset" in inspected &&
+            (params.since ?? "baseline") === "baseline"
+          ) {
+            const fileState = entry.files[params.file] ?? {
+              next: 0,
+              complete: false,
+            };
+            if ((params.offset ?? 0) === fileState.next) {
+              fileState.complete = inspected.nextOffset === null;
+              fileState.next = inspected.nextOffset;
+            }
+            entry.files[params.file] = fileState;
+          }
+          await writeJSON(
+            path.join(dir!, `${jobId}.inspection.json`),
+            evidence,
+          );
+        }
         return result(inspected);
       },
     }),
@@ -352,7 +507,13 @@ export default function childBridge(pi: ExtensionAPI) {
         const work = activeRequest();
         const brief = validateBrief(params);
         let review;
-        if (role === "reviewer") {
+        let taskApproval;
+        if (role === "task_lead" && brief.outcome === "completed")
+          taskApproval = await validateLeadCompletion(
+            launch.workScope,
+            work.bundle,
+          );
+        if (["reviewer", "oracle"].includes(role)) {
           if (!brief.verdict || !work.contract?.review)
             throw new Error(
               "A reviewer needs an assigned review contract and verdict.",
@@ -368,22 +529,8 @@ export default function childBridge(pi: ExtensionAPI) {
             throw new Error(
               "PASS needs acceptance/verification evidence and references without unresolved risks or next steps. Otherwise submit changes_requested/unknown.",
             );
-          if (
-            brief.verdict === "pass" &&
-            (await snapshot(launch.cwd)).fingerprint !==
-              work.contract.review.target
-          )
-            throw new Error(
-              "Checkout changed since review began. Report to the parent; a new review attempt is required.",
-            );
-          if (
-            brief.verdict === "pass" &&
-            (await readJSON(path.join(dir!, `${jobId}.inspection.json`)))
-              ?.target !== work.contract.review.target
-          )
-            throw new Error(
-              "Inspect the assigned changes with repo_review_changes before submitting PASS.",
-            );
+          if (brief.verdict === "pass")
+            await validateReviewTarget(work, dir!, jobId!);
           review = work.contract.review;
         } else if (brief.verdict)
           throw new Error(
@@ -392,6 +539,7 @@ export default function childBridge(pi: ExtensionAPI) {
         await writeJSON(path.join(dir!, `${jobId}.brief.json`), {
           brief,
           review,
+          taskApproval,
         });
         return result({
           status: "report-saved",
@@ -510,10 +658,37 @@ export default function childBridge(pi: ExtensionAPI) {
           "Parent exited. New requests are not accepted; current work will finish before exit.",
           "warning",
         );
-        maybeExit(ctx);
+        await maybeExit(ctx);
         return { action: "handled" };
       }
-      if (!event.text.startsWith(MARKER)) return;
+      if (!event.text.startsWith(MARKER)) {
+        if (role === "task_lead") {
+          const w = await getWork(launch.workScope, launch.bundle);
+          if (w.status === "completed") {
+            ctx.ui.notify(
+              "This task is complete. Ask the Orchestrator to reopen it before further refinements.",
+              "warning",
+            );
+            return { action: "handled" };
+          }
+          if (event.text.length > 8000)
+            throw new Error(
+              "Direct Task Lead input exceeds 8000 characters; narrow it or use reference paths.",
+            );
+          await coordinator.requireOwnership();
+          await coordinator.locked(() =>
+            recordDirectInput(coordinator, event.text),
+          );
+          await resumeLead();
+        } else if (["implementer"].includes(role)) {
+          ctx.ui.notify(
+            "Send refinements to the Task Lead pane so they remain in the task/review flow.",
+            "warning",
+          );
+          return { action: "handled" };
+        }
+        return;
+      }
       const newline = event.text.indexOf("\n");
       const id = event.text.slice(MARKER.length, newline);
       const request = await readJSON(path.join(dir, "request.json"));
@@ -534,7 +709,9 @@ export default function childBridge(pi: ExtensionAPI) {
       if (assignedRole !== role && jobId)
         throw new Error("Cannot change a running role.");
       role = assignedRole;
-      pi.setSessionName(`${role}: ${path.basename(launch.cwd)}`);
+      pi.setSessionName(
+        launch.label ?? `${role}: ${path.basename(launch.cwd)}`,
+      );
       applyRole();
       jobId = id;
       messages = [];
@@ -568,10 +745,20 @@ export default function childBridge(pi: ExtensionAPI) {
     if (!isChild()) return;
     await finish(ctx);
     await observeParent();
-    maybeExit(ctx);
+    await maybeExit(ctx);
   });
   const guardSwitch = async (_event: unknown, ctx: ExtensionContext) => {
-    if (isChild() && jobId) {
+    let pendingChildren = false;
+    if (role === "task_lead" && coordinator) {
+      for (const child of await coordinator.records()) {
+        if (
+          child.jobId &&
+          !(await readJSON(path.join(child.dir, `${child.jobId}.result.json`)))
+        )
+          pendingChildren = true;
+      }
+    }
+    if (isChild() && (jobId || pendingChildren)) {
       ctx.ui.notify(
         "Finish the delegated job before switching child sessions.",
         "warning",
@@ -609,7 +796,12 @@ export default function childBridge(pi: ExtensionAPI) {
         ctx.ui.notify("This is not a managed child.", "info");
         return;
       }
-      if (jobId || !ctx.isIdle() || ctx.hasPendingMessages()) {
+      if (
+        role === "task_lead" ||
+        jobId ||
+        !ctx.isIdle() ||
+        ctx.hasPendingMessages()
+      ) {
         ctx.ui.notify("Finish current work before detaching.", "warning");
         return;
       }
@@ -626,5 +818,11 @@ export default function childBridge(pi: ExtensionAPI) {
       );
     },
   });
-  return { isChild };
+  return {
+    isChild,
+    state: () => ({ role, launch, dir, request, parentGone }),
+    setCoordinator: (value: any) => {
+      coordinator = value;
+    },
+  };
 }

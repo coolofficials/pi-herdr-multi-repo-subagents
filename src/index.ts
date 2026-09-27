@@ -14,7 +14,11 @@ import {
   workStatus,
   getWork,
   reviseWork,
-} from "./workflow.mjs";
+  taskCandidate,
+  projectAction,
+  taskNote,
+  extendReview,
+} from "./hierarchy.mjs";
 import { repositoryContext } from "./discovery.mjs";
 import childBridge from "./child.ts";
 import { handoffs } from "./lifecycle.mjs";
@@ -39,14 +43,28 @@ export default function extension(pi: ExtensionAPI) {
   });
   const controllers = new Map<string, Controller>();
   const controller = (ctx: ExtensionContext) => {
-    if (child.isChild())
-      throw new Error("A child cannot control its parent's repository agents.");
+    const state = child.state();
+    if (child.isChild() && state.role !== "task_lead")
+      throw new Error("Only a Task Lead may coordinate scoped children.");
     if (!controllers.has(`${ctx.cwd}:${ctx.sessionManager.getSessionId()}`))
       controllers.set(
         `${ctx.cwd}:${ctx.sessionManager.getSessionId()}`,
         new Controller({
-          root: ctx.cwd,
+          root: state.launch?.root ?? ctx.cwd,
           owner: ctx.sessionManager.getSessionId(),
+          storage: state.launch?.storage,
+          delegation: child.isChild()
+            ? {
+                agentId: state.launch.agentId,
+                bundle: state.launch.bundle,
+                workScope: state.launch.workScope,
+                parent: state.launch.parent,
+                ancestors: [
+                  ...(state.launch.ancestors ?? []),
+                  { identity: state.launch.parent, scope: state.launch.scope },
+                ],
+              }
+            : undefined,
         }),
       );
     return controllers.get(`${ctx.cwd}:${ctx.sessionManager.getSessionId()}`)!;
@@ -75,6 +93,7 @@ export default function extension(pi: ExtensionAPI) {
   const monitor = async (ctx: ExtensionContext, version: number) => {
     try {
       const client = controller(ctx);
+      if (child.state().parentGone) return;
       client.lifecycle?.assertOwned();
       const pending = (await client.records()).filter(
         (r: any) => r.owner === client.owner && r.jobId,
@@ -88,7 +107,7 @@ export default function extension(pi: ExtensionAPI) {
           continue;
         const value = await client.read({ id: record.id });
         labels.push(
-          `${record.repo}: ${value.report ? value.liveState : value.status}`,
+          `${record.label ?? record.repo}: ${value.report ? value.liveState : value.status}`,
         );
         const key = `${record.jobId}:${value.report ? "report" : value.status}`;
         if (
@@ -159,10 +178,7 @@ export default function extension(pi: ExtensionAPI) {
   };
   const begin = async (_event: unknown, ctx: ExtensionContext) => {
     stop();
-    if (child.isChild()) return;
-    pi.setActiveTools(
-      pi.getActiveTools().filter((name) => !CHILD_TOOLS.has(name)),
-    );
+    if (child.isChild() && child.state().role !== "task_lead") return;
     delivered.clear();
     for (const key of handoffs.get(controller(ctx).root)?.deliveryKeys ?? [])
       delivered.add(key);
@@ -178,6 +194,21 @@ export default function extension(pi: ExtensionAPI) {
       if (entry.type === "message" && entry.message.role === "toolResult")
         acknowledge(entry.message.details);
     }
+    if (child.isChild()) {
+      if (child.state().role === "task_lead") {
+        const client = controller(ctx);
+        await client.connect({
+          handoff: true,
+          sessionFile: ctx.sessionManager.getSessionFile(),
+        });
+        child.setCoordinator(client);
+        timer = setTimeout(() => void monitor(ctx, generation), 1500);
+      }
+      return;
+    }
+    pi.setActiveTools(
+      pi.getActiveTools().filter((name) => !CHILD_TOOLS.has(name)),
+    );
     if (
       process.env.HERDR_ENV === "1" &&
       pi.getActiveTools().includes("repo_agent_start")
@@ -228,7 +259,7 @@ export default function extension(pi: ExtensionAPI) {
   pi.on("session_start", begin);
   pi.on("session_shutdown", async (event) => {
     stop();
-    if (!child.isChild()) {
+    {
       for (const client of controllers.values()) {
         try {
           if (event.reason === "quit") await client.release("quit");
@@ -269,16 +300,17 @@ export default function extension(pi: ExtensionAPI) {
     description: "Agent ID returned by repo_agent_start/list.",
   });
   const role = Type.Union([
-    Type.Literal("explorer"),
-    Type.Literal("librarian"),
+    Type.Literal("task_lead"),
+    Type.Literal("oracle"),
+    Type.Literal("scout"),
+    Type.Literal("researcher"),
     Type.Literal("implementer"),
     Type.Literal("reviewer"),
-    Type.Literal("verifier"),
   ]);
   const bundle = Type.Optional(
     Type.String({
       description:
-        "Work bundle ID. Required for implementation, review and verification.",
+        "Task ID for Task Lead and its children; project ID for Oracle. Omit for top-level research.",
     }),
   );
   pi.registerTool(
@@ -286,12 +318,22 @@ export default function extension(pi: ExtensionAPI) {
       name: "repo_agent_list",
       label: "Repository agents",
       description:
-        "Discover descendant Git/jj repository roots and known visible Herdr Pi agents. The current directory is the task root. Startup supplies a repository roster automatically; use this tool to refresh it or inspect the full list. Independent repositories may run concurrently; one managed agent per repository. The Orchestrator never edits repository code or reads raw diffs. Delegate discovery to explorer and external research to librarian only when useful.",
+        "Discover repositories and your directly managed agents. Orchestrator delegates tasks to task_lead and final project review to oracle. Task Lead delegates only within its assigned task. Scout/researcher are optional read-only research roles.",
       parameters: Type.Object({
         offset: Type.Optional(Type.Integer({ minimum: 0 })),
       }),
       async execute(_call, params, _signal, _update, ctx) {
-        const snapshot = await controller(ctx).list();
+        const client = controller(ctx);
+        const snapshot = await client.list();
+        if (client.delegation) {
+          const work = await getWork(
+            client.workScope,
+            client.delegation.bundle,
+          );
+          snapshot.repositories = snapshot.repositories.filter(
+            (r: any) => work.repos[r.repo],
+          );
+        }
         return result({
           ...snapshot,
           repositories: snapshot.repositories.slice(
@@ -317,7 +359,7 @@ export default function extension(pi: ExtensionAPI) {
       name: "repo_agent_start",
       label: "Delegate repository work",
       description:
-        "Create a visible Herdr pane with a separate Pi session in a discovered repository, then submit a bounded task. Returns immediately after submission. Final reports are delivered automatically and resume the parent. End your turn when only waiting; do not poll. Use repo_agent_read only for explicit status inspection; the full parent conversation is not copied. Child Pi loads applicable AGENTS.md normally. Does not move user focus. If startup or submission fails, inspect the retained agent before retrying. Choose explorer for local discovery, librarian for external sources, implementer for changes, reviewer for independent review, verifier for assigned runtime checks. repo=. is allowed only for read-only explorer/librarian task-root research. Implementation/review/verification require a repo_work bundle. Research/review have restricted tools; implementation is not an OS sandbox.",
+        "Open a role-specific Herdr pane and submit scoped work. Orchestrator may start task_lead/oracle at repo='.' and optional scout/researcher. Task Lead may start implementer in assigned repos, reviewer at repo='.' after repo_work candidate, and optional researchers. Keep roles in separate panes. Reports return only to the immediate manager; end the turn when waiting. Never retry uncertain delivery blindly.",
       parameters: Type.Object({
         repo: Type.String(),
         role,
@@ -377,7 +419,7 @@ export default function extension(pi: ExtensionAPI) {
       name: "repo_agent_reset",
       label: "Start fresh repository context",
       description:
-        "Start a fresh Pi conversation in the existing repo pane after the prior job settled and the child is idle. First tell the user why fresh context is useful. Supply a concise handoff and next task; old session files remain. Change role here. The first independent review must start a fresh conversation. Reuse the reviewer for bounded re-reviews. Preserve findings, original requirements, decisions, remaining requests and evidence references in the handoff; no full transcript.",
+        "Start a fresh Pi conversation in the existing repo pane after the prior job settled and the child is idle. First tell the user why fresh context is useful. Supply a concise handoff and next task; old session files remain. Role and task are fixed per pane. Reset refreshes that same role; reviewers are already separate from implementers. Reuse the reviewer for bounded re-reviews. Preserve findings, original requirements, decisions, remaining requests and evidence references in the handoff; no full transcript.",
       parameters: Type.Object({
         id,
         reason: Type.String({ minLength: 1, maxLength: 500 }),
@@ -420,6 +462,10 @@ export default function extension(pi: ExtensionAPI) {
         offset: Type.Optional(Type.Integer({ minimum: 0 })),
       }),
       async execute(_call, params, _signal, _update, ctx) {
+        if (child.isChild())
+          throw new Error(
+            "Task Lead uses its own repo_task_note, not shared task documents.",
+          );
         const client = controller(ctx);
         await client.requireOwnership();
         return result(
@@ -437,7 +483,7 @@ export default function extension(pi: ExtensionAPI) {
       name: "repo_work",
       label: "Reviewable work bundle",
       description:
-        "Create a coherent change bundle BEFORE implementation, recording acceptance criteria, cross-repo contracts and assigned verification with a file baseline. Research needs no bundle. Revise updates requirements only while idle, preserving history/baseline/budget and invalidating prior verdicts. List/status show durable planning and review state; complete refuses missing, stale or unsuccessful independent reviews. Initial review plus at most two re-reviews per repo. Reuse valid evidence; do not create tiny bundles per tool call. Snapshots have explicit size/file limits; no silent partial approval.",
+        "Orchestrator creates a task within a project before implementation, or revises/reopens its requirements. Task Lead may read its own status, declare candidate based on Implementer reports, and complete only after current independent Reviewer PASS. Completed tasks sharing changed files may need renewed approval. Do not request review after every small edit; batch a coherent completion candidate.",
       parameters: Type.Object({
         action: Type.Union([
           Type.Literal("create"),
@@ -445,8 +491,10 @@ export default function extension(pi: ExtensionAPI) {
           Type.Literal("status"),
           Type.Literal("complete"),
           Type.Literal("revise"),
+          Type.Literal("candidate"),
         ]),
         id: Type.Optional(Type.String()),
+        project: Type.Optional(Type.String()),
         title: Type.Optional(Type.String({ maxLength: 160 })),
         requirements: Type.Optional(Type.String({ maxLength: 8000 })),
         repos: Type.Optional(
@@ -456,26 +504,68 @@ export default function extension(pi: ExtensionAPI) {
       async execute(_call, params, _signal, _update, ctx) {
         const client = controller(ctx);
         await client.requireOwnership();
-        if (params.action === "create")
-          return result(await createWork(client, params));
-        if (params.action === "revise")
-          return result(
-            await client.locked(() =>
-              reviseWork(client, params.id, params.requirements),
-            ),
-          );
-        if (params.action === "list") {
-          const entries = await listWork(client.scope);
-          return result({
-            bundles: entries.slice(-50),
-            truncated: entries.length > 50,
-          });
-        }
         return result(
-          await client.locked(() =>
-            workStatus(client, params.id, params.action === "complete"),
-          ),
+          await client.locked(async () => {
+            if (params.action === "create") return createWork(client, params);
+            if (params.action === "revise")
+              return reviseWork(client, params.id, params.requirements);
+            if (params.action === "candidate")
+              return taskCandidate(client, params.id);
+            if (params.action === "list") {
+              const entries = (await listWork(client.workScope)).filter(
+                (w: any) =>
+                  !client.delegation || w.id === client.delegation.bundle,
+              );
+              return {
+                bundles: entries.slice(-50),
+                truncated: entries.length > 50,
+              };
+            }
+            return workStatus(client, params.id, params.action === "complete");
+          }),
         );
+      },
+    }),
+  );
+  pi.registerTool(
+    defineTool({
+      name: "repo_project",
+      label: "Overall work",
+      description:
+        "Orchestrator-only overall requirements and completion gate. Create before tasks. Candidate requires approved completion reports from every Task Lead; then delegate oracle at repo='.' with the project ID as bundle. Complete requires a current Oracle PASS. Revise reopens overall requirements, invalidates its approval and preserves review budget. Status/list are compact; no source/diff.",
+      parameters: Type.Object({
+        action: Type.Union([
+          Type.Literal("create"),
+          Type.Literal("list"),
+          Type.Literal("status"),
+          Type.Literal("candidate"),
+          Type.Literal("complete"),
+          Type.Literal("revise"),
+        ]),
+        id: Type.Optional(Type.String()),
+        title: Type.Optional(Type.String({ maxLength: 160 })),
+        requirements: Type.Optional(Type.String({ maxLength: 8000 })),
+      }),
+      async execute(_call, params, _signal, _update, ctx) {
+        const client = controller(ctx);
+        await client.requireOwnership();
+        return result(await client.locked(() => projectAction(client, params)));
+      },
+    }),
+  );
+  pi.registerTool(
+    defineTool({
+      name: "repo_task_note",
+      label: "Task Lead decisions",
+      description:
+        "Task Lead-only bounded notes for direct user refinements, local decisions and handoff. Omit text to read; text replaces notes. Changes invalidate local approval. Do not change acceptance criteria here: escalate those to the Orchestrator.",
+      parameters: Type.Object({
+        text: Type.Optional(Type.String({ maxLength: 8000 })),
+      }),
+      async execute(_call, params, _signal, _update, ctx) {
+        const client = controller(ctx);
+        await client.requireOwnership();
+        return result(await client.locked(() => taskNote(client, params)));
       },
     }),
   );
@@ -491,26 +581,18 @@ export default function extension(pi: ExtensionAPI) {
       }
       const [action, ...words] = args.trim().split(/\s+/);
       if (action === "extend-review") {
-        const [bundleId, ...repoParts] = words;
+        const [kind, bundleId] = words;
+        if (!["task", "oracle"].includes(kind))
+          throw new Error("Use /repo-agents extend-review <task|oracle> <ID>.");
         const client = controller(ctx);
         await client.requireOwnership();
-        await client.locked(async () => {
-          const work = await getWork(client.scope, bundleId);
-          const repo = work.repos[repoParts.join(" ")];
-          if (!repo)
-            throw new Error(
-              "Use /repo-agents extend-review <bundle ID> <relative repo path>.",
-            );
-          repo.reviewLimit = (repo.reviewLimit ?? 3) + 1;
-          await writeJSON(
-            path.join(client.scope, "work", `${work.id}.json`),
-            work,
-          );
-          ctx.ui.notify(
-            `Review limit extended to ${repo.reviewLimit} by explicit user command.`,
-            "info",
-          );
-        });
+        const limit = await client.locked(() =>
+          extendReview(client, kind, bundleId),
+        );
+        ctx.ui.notify(
+          `Review limit extended to ${limit} by explicit user command.`,
+          "info",
+        );
         return;
       }
       if (action === "history" || action === "recover") {

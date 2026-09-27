@@ -68,9 +68,11 @@ export class Lifecycle {
     env = process.env,
     identity,
     inspect = inspectProcess,
+    coordinationKey = /** @type {string | undefined} */ (undefined),
   }) {
     this.root = fs.realpathSync(root);
     this.scope = scope;
+    this.key = coordinationKey ?? this.root;
     this.env = env;
     this.identity = identity ?? processIdentity();
     /** @type {any} */
@@ -101,7 +103,7 @@ export class Lifecycle {
   read() {
     const row = this.db
       .prepare("SELECT state FROM roots WHERE root = ?")
-      .get(this.root);
+      .get(this.key);
     return row ? JSON.parse(row.state) : null;
   }
   save(state) {
@@ -109,7 +111,7 @@ export class Lifecycle {
       .prepare(
         "INSERT INTO roots VALUES (?, ?) ON CONFLICT(root) DO UPDATE SET state=excluded.state",
       )
-      .run(this.root, JSON.stringify(state));
+      .run(this.key, JSON.stringify(state));
   }
   status() {
     const state = this.read();

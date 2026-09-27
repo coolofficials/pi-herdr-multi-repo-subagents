@@ -1,11 +1,18 @@
 export const ROLES = [
-  "explorer",
-  "librarian",
+  "task_lead",
+  "oracle",
+  "scout",
+  "researcher",
   "implementer",
   "reviewer",
-  "verifier",
 ];
-export const READ_ONLY_ROLES = new Set(["explorer", "librarian", "reviewer"]);
+export const READ_ONLY_ROLES = new Set([
+  "task_lead",
+  "scout",
+  "researcher",
+  "reviewer",
+  "oracle",
+]);
 export const MAIN_TOOLS = new Set([
   "repo_agent_list",
   "repo_agent_start",
@@ -15,12 +22,25 @@ export const MAIN_TOOLS = new Set([
   "repo_agent_forget",
   "repo_task_document",
   "repo_work",
+  "repo_project",
+]);
+export const LEAD_TOOLS = new Set([
+  "repo_agent_list",
+  "repo_agent_start",
+  "repo_agent_prompt",
+  "repo_agent_read",
+  "repo_agent_reset",
+  "repo_agent_forget",
+  "repo_work",
+  "repo_task_note",
+  "repo_agent_report",
 ]);
 export const CHILD_TOOLS = new Set([
   "repo_source",
   "repo_research_fetch",
   "repo_agent_report",
   "repo_review_changes",
+  "repo_task_note",
 ]);
 export function roleName(role = "implementer") {
   if (!ROLES.includes(role)) throw new Error("Unknown repository role.");
@@ -85,18 +105,20 @@ export function validateBrief(value) {
 }
 export function roleGuidance(role) {
   const responsibility = {
-    explorer:
+    task_lead:
+      "Own one assigned task. Judge readiness only from implementer conversations and compact reports; never read code or execute shell commands. Delegate implementation and checks within the assigned repositories. Handle direct user refinements locally and save concise decisions via repo_task_note. Escalate changes to requirements, acceptance criteria or cross-task contracts to the Orchestrator before proceeding. When implementation reports support completion, call repo_work candidate, then request an independent reviewer in a separate pane. Route findings back to implementers; batch fixes before requesting another review. Only report completed after repo_work complete accepts a current Reviewer PASS. Progress/blockers may be reported without approval. Do not narrate every internal step to the Orchestrator. When waiting for children, end the turn without submitting a final report; automatic child reports resume you. Research is optional.",
+    oracle:
+      "Independently assess the whole project against its original/current requirements and the accepted task results. Inspect actual artifacts with repo_review_changes and repo_source, especially integration boundaries and missing acceptance evidence. Reuse valid task review evidence rather than repeat every local review. You are read-only: request concrete execution evidence through findings if needed. Submit PASS only when overall completion is supported; otherwise report actionable findings and affected tasks.",
+    scout:
       "Investigate local code and architecture without editing. Return facts, dependency/contract boundaries, constraints, alternatives, uncertainty and precise source references. Do not implement or reproduce large source excerpts.",
-    librarian:
+    researcher:
       "Research external documentation and dependency behavior without editing. Use HTTPS source retrieval or existing local references. State applicable versions, source URLs, limitations and uncertainty. If a source cannot be found or fetched, report the gap; never invent research. No general web search engine is bundled.",
     implementer:
       "Implement the assigned acceptance criteria, using the supplied research and plan. Read actual code before modifying it. Preserve others' changes. Validate only the assigned scope and report evidence, skipped checks and remaining risks.",
     reviewer:
       "Independently review the complete change against the original requirements. Use repo_review_changes to inspect the baseline, current changes and required files. Review real bugs, missing requirements and concrete risks. Do not implement. Re-reviews focus on unresolved findings and the impact of remediation; do not reopen unchanged accepted decisions. Submit a verdict with repo_agent_report.",
-    verifier:
-      "Verify the assigned observable behavior and cross-repository contracts. Reuse valid evidence instead of repeating all checks. Run only assigned checks. Report actual results and limitations; coordinate any necessary code fixes through the parent.",
   };
-  return `You are the ${role} in a process-owned repository workflow. ${responsibility[role]} Follow applicable AGENTS.md, including response language. Finish by calling repo_agent_report with a compact structured brief, then end the turn. Raw code, diffs and logs stay in this conversation. Include source paths/URLs so another child can inspect the evidence. A completed job is not a reviewed work bundle. Do not spawn other agents or change your assigned role.`;
+  return `You are the ${role} in a process-owned repository workflow. ${responsibility[role]} Follow applicable AGENTS.md, including response language. For a final outcome call repo_agent_report with a compact structured brief, then end the turn. A task_lead awaiting children must instead end its turn without a final report. Raw code, diffs and logs stay in this conversation. Include source paths/URLs so another child can inspect the evidence. A completed job is not a reviewed work bundle. Only task_lead may delegate scoped children. After approved task completion, implementers exit to release checkout reservations; forget their exited records before starting replacement implementers if work is reopened. Other roles cannot spawn agents. Never change your own assigned role.`;
 }
 export function publicReport(report) {
   if (!report) return null;
@@ -117,6 +139,14 @@ export function publicReport(report) {
         : "No valid structured report. Ask the child to submit repo_agent_report; inspect its pane for raw details.",
     usage: report.usage,
     finishedAt: report.finishedAt,
-    review: report.review,
+    review: report.review
+      ? {
+          jobId: report.review.jobId,
+          attempt: report.review.attempt,
+          limit: report.review.limit,
+          requirementsRevision: report.review.requirementsRevision,
+          invalidated: report.review.invalidated ?? false,
+        }
+      : undefined,
   };
 }
