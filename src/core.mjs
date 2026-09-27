@@ -822,21 +822,6 @@ export class Controller {
       );
     return result;
   }
-  async wait({ id, timeout = 30 }, signal) {
-    const deadline = Date.now() + Math.max(1, Math.min(timeout, 60)) * 1000;
-    for (;;) {
-      const result = await this.read({ id }, signal);
-      if (
-        result.report ||
-        ["blocked", "unavailable", "interrupted", "detached"].includes(
-          result.status,
-        )
-      )
-        return result;
-      if (Date.now() >= deadline) return { ...result, timedOut: true };
-      await sleep(Math.min(1000, Math.max(1, deadline - Date.now())), signal);
-    }
-  }
   async reset({ id, reason, task, context = "" }, signal) {
     validateWork(task, context);
     if (!reason?.trim())

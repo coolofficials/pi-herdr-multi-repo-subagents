@@ -196,11 +196,11 @@ test("uncertain submission remains registered and is never retried automatically
   );
   assert.equal(calls.filter((x) => x[1] === "prompt").length, 1);
 });
-test("working and blocked agents reject followup; wait returns blocked without claiming success", async (t) => {
+test("working and blocked agents reject followup; read returns blocked without claiming success", async (t) => {
   const { controller, live } = await controlled(t);
   const value = await controller.start({ repo: "repos/api", task: "test" });
   live.get(value.id).status = "blocked";
-  const result = await controller.wait({ id: value.id, timeout: 1 });
+  const result = await controller.read({ id: value.id });
   assert.equal(result.status, "blocked");
   assert.equal(result.report, null);
 });

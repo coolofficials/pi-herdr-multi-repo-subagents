@@ -55,6 +55,8 @@ Paths are literal paths relative to the root, not globs. `include` replaces auto
 
 ## Interaction
 
+Completion is notification-driven. End the main turn when only waiting; the extension delivers results automatically. Use `repo_agent_read` for an explicit status question or diagnosis. Version 0.3.1 removes `repo_agent_wait`; do not replace it with repeated reads or shell polling.
+
 - A delegated repository gets its own tab by default; focus stays with the user. Split layout is optional.
 - Each main Pi process owns its own children. One managed main owns a canonical task root within a Pi profile; other main processes cannot submit work for that root. Each checkout has one managed child reservation across roots in that profile. Independent repositories can work concurrently. A newly started main never adopts a previous main's children, even when resuming the same conversation.
 - The coordinator passes a bounded task and relevant context, not its full conversation. AGENTS.md supplies language, project policies and conventions. Instructions that existed only in the parent conversation must be explicitly passed.
@@ -68,7 +70,6 @@ Paths are literal paths relative to the root, not globs. `include` replaces auto
 | `repo_agent_start`  | Open a Pi child and delegate a task                          |
 | `repo_agent_prompt` | Follow up in an idle existing child                          |
 | `repo_agent_read`   | Inspect current job report; optional bounded pane snapshot   |
-| `repo_agent_wait`   | Explicit bounded wait, up to 60 seconds                      |
 | `repo_agent_reset`  | Start fresh context in the same tab, with reason and handoff |
 | `repo_agent_forget` | Forget a child only after it exits; retain pane and reports  |
 
