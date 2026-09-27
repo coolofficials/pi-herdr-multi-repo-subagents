@@ -23,6 +23,26 @@ For example: “Check the timeout contract against the implementations, improve 
 
 The roster refreshes before each task turn, so repositories cloned after startup are recognized. Automatic coordination stays inactive when there are no descendant repositories, outside Herdr, inside child sessions, or when delegation tools are disabled. Discovery failures appear in the footer and withhold mutation tools until resolved. Once a process becomes a managed Orchestrator, its restrictions remain for that process. A standalone Pi outside Herdr or in a repository with no discovered descendants retains ordinary tools.
 
+## Session identity and concurrent work
+
+The main session is named `Orchestrator`, regardless of how many tasks it coordinates. Child session names are `Role · task title` (Oracle uses the project title). These automatic names are presentation metadata, not new agent sessions.
+
+A local widget above the editor separates identity, assignment, execution state and direct children. For example:
+
+```text
+[Task Lead] Task: Prepare release artifacts
+State: waiting for 2 children | Reports to: Orchestrator
+  → Implementer [agent-id] | repos/app | running
+  → Scout [agent-id] | repos/api | running
+Children: 2 pending · 0 attention · 0 reported
+```
+
+The compact footer repeats only this agent's role and current state. Implementer and other repo workers also show their repository and report recipient. The Orchestrator shows its root scope and active/completed task counts instead of implying that it owns just one task. Up to three pending/attention children are shown, with attention first and a remaining count; the board retains the full roster. Long labels are bounded. `reported` means a child has returned a report, not that an entire task or project has passed its review gate.
+
+Different checkouts can run concurrently. The Orchestrator can delegate several Task Leads before their results arrive; each Lead can delegate multiple workers in its assigned repositories. Mutating dispatch uses a process-safe SQLite lease to protect coordination state, while accepted jobs execute independently. Competing calls wait locally (up to 120 seconds) for the lease; they do not ask the model to retry or repeat a submitted operation. Automatic view cleanup skips a busy lease and tries again on a later tick. Unknown owners are retained; only confirmed dead owners can be replaced. Unfinished tasks sharing a checkout are rejected and must run sequentially. Cross-repo dependencies still need an explicit task order.
+
+Status refreshes use local durable job state (about 2 seconds in children / 3 seconds in main), independently of automatic-report delivery acknowledgements. They do not invoke the model or add status text to its context. A waiting manager receives automatic reports and resumes; no polling tool is required. The UI is an eventually consistent snapshot, not a guarantee that every transition is shown instantly.
+
 ## Directory layout
 
 No directory name, organization, ticket convention, or response language is built in. For example:

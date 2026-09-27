@@ -1,3 +1,4 @@
+import { withOperationLock } from "./coordination-lock.mjs";
 import { createTaskPane, shellAvailable } from "./views.mjs";
 import { scopedInstructions } from "./scopes.mjs";
 import fs from "node:fs/promises";
@@ -386,46 +387,20 @@ export class Controller {
   async records() {
     return readJSON(this.indexFile, []);
   }
-  async locked(fn) {
-    const pending = this.queue.then(() => this.acquire(fn));
+  async locked(fn, options = {}) {
+    const pending = this.queue.then(() => this.acquire(fn, options));
     this.queue = pending.catch(() => {});
     return pending;
   }
-  async acquire(fn) {
-    await fs.mkdir(this.scope, { recursive: true, mode: 0o700 });
-    const lock = path.join(this.workScope, "operation.lock");
-    let handle;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        handle = await fs.open(lock, "wx", 0o600);
-        await handle.writeFile(String(process.pid));
-        break;
-      } catch (e) {
-        if (e.code !== "EEXIST") throw e;
-        const pid = Number(await fs.readFile(lock, "utf8"));
-        if (pid > 0) {
-          try {
-            process.kill(pid, 0);
-            throw new Error(
-              "Another repository-agent operation is in progress. Retry after it finishes.",
-            );
-          } catch (err) {
-            if (err.code !== "ESRCH") throw err;
-          }
-        } else
-          throw new Error(
-            "Repository-agent lock is being initialized. Retry shortly.",
-          );
-        await fs.unlink(lock);
-      }
-    }
-    if (!handle) throw new Error("Could not acquire repository-agent lock.");
-    try {
-      return await fn();
-    } finally {
-      await handle.close();
-      await fs.unlink(lock);
-    }
+  async acquire(fn, options = {}) {
+    return withOperationLock(
+      this.workScope,
+      async () => {
+        if (this.lifecycle) await this.requireOwnership();
+        return fn();
+      },
+      { ...options, identity: this.identity },
+    );
   }
   async list() {
     const found = await discoverRepos(this.root);
@@ -944,6 +919,7 @@ export class Controller {
         ancestors: this.delegation?.ancestors ?? [],
         bundle,
         storage: this.storage,
+        parentRole: this.delegation ? "task_lead" : "orchestrator",
         workflowId: this.owner,
         expiresAt: Date.now() + 120000,
         parent: this.identity,

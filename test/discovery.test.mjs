@@ -28,6 +28,7 @@ async function setup(t, { inside = true, child = false } = {}) {
   const messages = [];
   extension({
     registerFlag() {},
+    setSessionName() {},
     getFlag: () => (child ? "child-launch" : undefined),
     getActiveTools: () => ["repo_agent_start"],
     setActiveTools() {},
@@ -38,6 +39,7 @@ async function setup(t, { inside = true, child = false } = {}) {
   });
   const ctx = {
     cwd: root,
+    isIdle: () => true,
     ui: { setStatus: (key, value) => statuses.set(key, value) },
     sessionManager: {
       getSessionId: () => "test-session",
@@ -60,7 +62,7 @@ test("startup discovers repositories without a user command, model call, or agen
     recursive: true,
   });
   await handlers.get("session_start")({ reason: "startup" }, ctx);
-  assert.match(statuses.get("repo-discovery"), /Orchestrator · 1 repos/);
+  assert.match(statuses.get("repo-workflow"), /\[Orchestrator\] idle/);
   assert.equal(messages.length, 0);
   await fs.access(
     path.join(

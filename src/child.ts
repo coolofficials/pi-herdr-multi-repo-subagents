@@ -1,3 +1,4 @@
+import { showChild } from "./presentation.mjs";
 import { runCheck } from "./checks.mjs";
 import fs from "node:fs/promises";
 import {
@@ -243,6 +244,7 @@ export default function childBridge(pi: ExtensionAPI) {
   const watch = async (ctx: ExtensionContext, version: number) => {
     try {
       if (version !== generation || detached) return;
+      await showChild(pi, ctx, launch, dir!, coordinator);
       const status = await observeParent();
       if (version !== generation) return;
       ctx.ui.setStatus(
@@ -390,10 +392,7 @@ export default function childBridge(pi: ExtensionAPI) {
     if (!jobId)
       event.systemPromptOptions.sections.pi_repo_role +=
         "\nThere is no delegated job. Answer questions only; do not modify artifacts, submit a parent report or claim bundle completion. Direct refinements belong in Task Lead pane.";
-    ctx.ui.setStatus(
-      "repo-role",
-      launch.label ?? `${role} · ${request?.bundle ?? "research"}`,
-    );
+    await showChild(pi, ctx, launch, dir!, coordinator);
   });
   pi.on("tool_call", async (event) => {
     if (!isChild() || detached) return;
@@ -934,9 +933,6 @@ export default function childBridge(pi: ExtensionAPI) {
         throw new Error("Cannot change a running role.");
       role = assignedRole;
       registerReport();
-      pi.setSessionName(
-        launch.label ?? `${role}: ${path.basename(launch.cwd)}`,
-      );
       applyRole();
       jobId = id;
       messages = [];

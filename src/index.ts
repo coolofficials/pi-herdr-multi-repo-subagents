@@ -1,3 +1,5 @@
+import { CoordinationBusy } from "./coordination-lock.mjs";
+import { showCoordinator } from "./presentation.mjs";
 import { Type } from "@earendil-works/pi-ai";
 import {
   defineTool,
@@ -105,8 +107,13 @@ export default function extension(pi: ExtensionAPI) {
       if (child.state().parentGone) return;
       client.lifecycle?.assertOwned();
       if (!client.delegation) {
-        if ((await loadConfig(client.root)).layout !== "split")
-          await client.locked(() => maintainViews(client));
+        if ((await loadConfig(client.root)).layout !== "split") {
+          try {
+            await client.locked(() => maintainViews(client), { timeoutMs: 0 });
+          } catch (error) {
+            if (!(error instanceof CoordinationBusy)) throw error;
+          }
+        }
         const requests = (
           await fs
             .readdir(path.join(client.scope, "board-requests"))
@@ -140,15 +147,11 @@ export default function extension(pi: ExtensionAPI) {
       );
       const updates: any[] = [];
       let reportCharacters = 0;
-      const labels: string[] = [];
       for (const record of pending) {
         if (version !== generation) return;
         if (reading.has(record.id) || delivered.has(`${record.jobId}:report`))
           continue;
         const value = await client.read({ id: record.id });
-        labels.push(
-          `${record.label ?? record.repo}: ${value.report ? value.liveState : value.status}`,
-        );
         const key = `${record.jobId}:${value.report ? "report" : value.status}`;
         if (
           !delivered.has(key) &&
@@ -165,7 +168,7 @@ export default function extension(pi: ExtensionAPI) {
         }
       }
       if (version !== generation) return;
-      ctx.ui.setStatus("repo-agents", labels.join(" | ") || undefined);
+      if (!child.isChild()) await showCoordinator(pi, ctx, client);
       if (updates.length && !ctx.hasPendingMessages()) {
         pi.sendMessage(
           {
@@ -208,12 +211,8 @@ export default function extension(pi: ExtensionAPI) {
         return `Repository coordination is owned by another session or needs an explicit same-process handoff. ${state.reason} Do not work around this by spawning agents or modifying the shared repositories from here.`;
       }
     }
-    ctx.ui.setStatus(
-      "repo-discovery",
-      snapshot.repositories.length
-        ? `${child.isChild() ? "Task Lead" : "Orchestrator"} · ${snapshot.repositories.length} repos`
-        : undefined,
-    );
+    if (!child.isChild() && snapshot.repositories.length)
+      await showCoordinator(pi, ctx, client);
     return repositoryContext(snapshot);
   };
   const begin = async (_event: unknown, ctx: ExtensionContext) => {

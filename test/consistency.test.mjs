@@ -180,3 +180,29 @@ test("parallel inspection updates retain every entry and failed operations do no
   );
   assert.equal(await run(async () => 42), 42);
 });
+
+test("independent repositories allow concurrent tasks, overlapping unfinished checkout does not", async (t) => {
+  const f = await fixture(t);
+  await fs.mkdir(path.join(f.root, "other"));
+  execFileSync("git", ["init", "-q", path.join(f.root, "other")]);
+  await fs.writeFile(
+    path.join(f.root, "other", "b.mjs"),
+    "export const b=1;\n",
+  );
+  const other = await createWork(f.client, {
+    project: f.project.id,
+    title: "B",
+    requirements: "Change b",
+    repos: ["other"],
+  });
+  assert.notEqual(other.id, f.task.id);
+  await assert.rejects(
+    createWork(f.client, {
+      project: f.project.id,
+      title: "Overlap",
+      requirements: "Change a concurrently",
+      repos: ["repo"],
+    }),
+    /unfinished|overlap|already/i,
+  );
+});
