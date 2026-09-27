@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { serialExecutor } from "./storage.mjs";
 import path from "node:path";
 import { childWorkState, setJobPhase } from "./execution.mjs";
 import { randomUUID } from "node:crypto";
@@ -41,6 +42,7 @@ export default function childBridge(pi: ExtensionAPI) {
   let dir: string | undefined;
   let launch: any;
   let coordinator: any;
+  const withEvidence = serialExecutor();
   let localInputTurn = false;
   let localReceipt: string | undefined;
   let request: any;
@@ -410,23 +412,25 @@ export default function childBridge(pi: ExtensionAPI) {
         limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
       }),
       async execute(_call, params) {
-        requireScope();
-        if (role === "task_lead")
-          throw new Error(
-            "Task Lead plans from reports; source access is unavailable.",
-          );
-        const base = params.scope === "task" ? launch.root : launch.cwd;
-        const inspected = await inspectSource(base, params);
-        if (role === "reviewer" && jobId)
-          await noteSourceAccess(
-            activeRequest(),
-            dir!,
-            jobId,
-            base,
-            params,
-            inspected,
-          );
-        return result(inspected);
+        return withEvidence(async () => {
+          requireScope();
+          if (role === "task_lead")
+            throw new Error(
+              "Task Lead plans from reports; source access is unavailable.",
+            );
+          const base = params.scope === "task" ? launch.root : launch.cwd;
+          const inspected = await inspectSource(base, params);
+          if (role === "reviewer" && jobId)
+            await noteSourceAccess(
+              activeRequest(),
+              dir!,
+              jobId,
+              base,
+              params,
+              inspected,
+            );
+          return result(inspected);
+        });
       },
     }),
   );
@@ -481,52 +485,54 @@ export default function childBridge(pi: ExtensionAPI) {
         offset: Type.Optional(Type.Integer({ minimum: 0 })),
       }),
       async execute(_call, params) {
-        const work = activeRequest();
-        if (!["reviewer", "oracle"].includes(role))
-          throw new Error(
-            "Only an independent reviewer/oracle may inspect changes.",
-          );
-        const inspected = await inspectHierarchyReview(work, params);
-        if (params.repo && "fingerprint" in inspected) {
-          const evidence = await readJSON(
-            path.join(dir!, `${jobId}.inspection.json`),
-            {},
-          );
-          const entry = (evidence[params.repo] ??= {
-            target: inspected.fingerprint,
-            files: {},
-          });
-          if (
-            params.file &&
-            "nextOffset" in inspected &&
-            (params.since ?? "baseline") === "baseline"
-          ) {
-            const fileState = entry.files[params.file] ?? {
-              next: 0,
-              complete: false,
-            };
-            if ((params.offset ?? 0) === fileState.next) {
-              fileState.complete = inspected.nextOffset === null;
-              fileState.next = inspected.nextOffset;
+        return withEvidence(async () => {
+          const work = activeRequest();
+          if (!["reviewer", "oracle"].includes(role))
+            throw new Error(
+              "Only an independent reviewer/oracle may inspect changes.",
+            );
+          const inspected = await inspectHierarchyReview(work, params);
+          if (params.repo && "fingerprint" in inspected) {
+            const evidence = await readJSON(
+              path.join(dir!, `${jobId}.inspection.json`),
+              {},
+            );
+            const entry = (evidence[params.repo] ??= {
+              target: inspected.fingerprint,
+              files: {},
+            });
+            if (
+              params.file &&
+              "nextOffset" in inspected &&
+              (params.since ?? "baseline") === "baseline"
+            ) {
+              const fileState = entry.files[params.file] ?? {
+                next: 0,
+                complete: false,
+              };
+              if ((params.offset ?? 0) === fileState.next) {
+                fileState.complete = inspected.nextOffset === null;
+                fileState.next = inspected.nextOffset;
+              }
+              entry.files[params.file] = fileState;
+              if (role === "reviewer" && fileState.complete) {
+                const target = work.contract.review.targets[params.repo];
+                const file = path.relative(
+                  launch.root,
+                  path.join(target.path, params.file),
+                );
+                await addReviewDependencies(work, dir!, jobId!, {
+                  files: [file],
+                });
+              }
             }
-            entry.files[params.file] = fileState;
-            if (role === "reviewer" && fileState.complete) {
-              const target = work.contract.review.targets[params.repo];
-              const file = path.relative(
-                launch.root,
-                path.join(target.path, params.file),
-              );
-              await addReviewDependencies(work, dir!, jobId!, {
-                files: [file],
-              });
-            }
+            await writeJSON(
+              path.join(dir!, `${jobId}.inspection.json`),
+              evidence,
+            );
           }
-          await writeJSON(
-            path.join(dir!, `${jobId}.inspection.json`),
-            evidence,
-          );
-        }
-        return result(inspected);
+          return result(inspected);
+        });
       },
     }),
   );
@@ -543,13 +549,15 @@ export default function childBridge(pi: ExtensionAPI) {
         ),
       }),
       async execute(_call, params) {
-        if (role !== "reviewer")
-          throw new Error(
-            "Only the assigned Reviewer declares task approval scope.",
+        return withEvidence(async () => {
+          if (role !== "reviewer")
+            throw new Error(
+              "Only the assigned Reviewer declares task approval scope.",
+            );
+          return result(
+            await addReviewDependencies(activeRequest(), dir!, jobId!, params),
           );
-        return result(
-          await addReviewDependencies(activeRequest(), dir!, jobId!, params),
-        );
+        });
       },
     }),
   );
@@ -613,7 +621,9 @@ export default function childBridge(pi: ExtensionAPI) {
             );
           review =
             brief.verdict === "pass"
-              ? await validateReviewTarget(work, dir!, jobId!)
+              ? await withEvidence(() =>
+                  validateReviewTarget(work, dir!, jobId!),
+                )
               : work.contract.review;
         } else if (brief.verdict)
           throw new Error(

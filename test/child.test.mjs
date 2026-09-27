@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import { execFileSync } from "node:child_process";
+import { snapshot } from "../src/workflow.mjs";
 import childBridge from "../src/child.ts";
 import { readJSON, writeJSON, MARKER } from "../src/core.mjs";
 
@@ -12,13 +14,15 @@ async function child(t, options = {}) {
     await fs.mkdtemp(path.join(os.tmpdir(), "pi-herdr-child-")),
   );
   const handlers = new Map(),
-    commands = new Map();
+    commands = new Map(),
+    registered = new Map();
   let tools = ["read", "repo_agent_start"],
     shutdowns = 0;
   const parent = options.parent ?? processIdentity();
   await writeJSON(path.join(dir, "launch.json"), {
     token: "launch",
     cwd: dir,
+    root: dir,
     parent,
     scope: dir,
     workflowId: "parent",
@@ -28,10 +32,12 @@ async function child(t, options = {}) {
     instance: parent,
     status: "active",
   });
-  childBridge({
+  const bridge = childBridge({
     on: (name, fn) => handlers.set(name, fn),
     registerFlag() {},
-    registerTool() {},
+    registerTool(tool) {
+      registered.set(tool.name, tool);
+    },
     setSessionName() {},
     getAllTools: () => tools.map((name) => ({ name })),
     getFlag: () =>
@@ -64,8 +70,10 @@ async function child(t, options = {}) {
   await writeJSON(path.join(dir, "request.json"), {
     jobId: "job-1",
     owner: "parent",
+    role: options.role,
   });
-  return { dir, emit, ctx, commands, shutdowns: () => shutdowns };
+  if (options.coordinator) bridge.setCoordinator(options.coordinator);
+  return { dir, emit, ctx, commands, registered, shutdowns: () => shutdowns };
 }
 test("child captures at settled, not agent_end, and retains language from the model", async (t) => {
   const { dir, emit } = await child(t);
@@ -173,4 +181,103 @@ test("unknown parent is retained; reload does not abort job; detach rejects dele
     (await f.emit("input", { text: `${MARKER}job-1\nWork` })).action,
     "handled",
   );
+});
+
+test("lead missing a brief without pending children produces needs-report", async (t) => {
+  const f = await child(t, {
+    role: "task_lead",
+    coordinator: { records: async () => [] },
+  });
+  await f.emit("input", { text: `${MARKER}job-1\nWork` });
+  await f.emit("agent_settled");
+  assert.equal(
+    (await readJSON(path.join(f.dir, "job-1.result.json"))).status,
+    "needs-report",
+  );
+  assert.equal(
+    (await readJSON(path.join(f.dir, "job-state.json"))).jobId,
+    undefined,
+  );
+});
+test("lead without brief waits only for actual pending children", async (t) => {
+  let dir;
+  const f = await child(t, {
+    role: "task_lead",
+    coordinator: { records: async () => [{ id: "pending", dir }] },
+  });
+  dir = path.join(f.dir, "pending");
+  await writeJSON(path.join(dir, "request.json"), { jobId: "pending-job" });
+  await f.emit("input", { text: `${MARKER}job-1\nWork` });
+  await f.emit("agent_settled");
+  assert.equal(await readJSON(path.join(f.dir, "job-1.result.json")), null);
+  assert.equal(
+    (await readJSON(path.join(f.dir, "activity.json"))).status,
+    "waiting_children",
+  );
+  await writeJSON(path.join(dir, "pending-job.result.json"), {
+    status: "settled",
+  });
+  await f.emit("agent_settled");
+  assert.equal(
+    (await readJSON(path.join(f.dir, "job-1.result.json"))).status,
+    "needs-report",
+  );
+});
+
+test("parallel Reviewer tools preserve coverage and dependencies for every repo", async (t) => {
+  const f = await child(t, { role: "reviewer" });
+  const targets = {};
+  for (const repo of ["a", "b"]) {
+    const cwd = path.join(f.dir, repo);
+    await fs.mkdir(cwd);
+    execFileSync("git", ["init", "-q", cwd]);
+    await fs.writeFile(path.join(cwd, "index.mjs"), "export const n=1;\n");
+    const baseline = path.join(f.dir, repo + ".base.json");
+    await writeJSON(baseline, await snapshot(cwd));
+    await fs.writeFile(path.join(cwd, "index.mjs"), "export const n=2;\n");
+    const target = await snapshot(cwd),
+      saved = path.join(f.dir, repo + ".target.json");
+    await writeJSON(saved, target);
+    targets[repo] = {
+      path: cwd,
+      baseline,
+      target: target.fingerprint,
+      snapshot: saved,
+    };
+  }
+  await writeJSON(path.join(f.dir, "request.json"), {
+    jobId: "job-1",
+    owner: "parent",
+    role: "reviewer",
+    contract: { root: f.dir, review: { kind: "work", targets } },
+  });
+  await f.emit("input", { text: `${MARKER}job-1\nReview` });
+  const tool = f.registered.get("repo_review_changes");
+  await Promise.all(
+    ["a", "b"].map((repo) => tool.execute("call", { repo, file: "index.mjs" })),
+  );
+  const inspected = await readJSON(path.join(f.dir, "job-1.inspection.json"));
+  assert.deepEqual(Object.keys(inspected).sort(), ["a", "b"]);
+  for (const repo of ["a", "b"])
+    assert.equal(inspected[repo].files["index.mjs"].complete, true);
+  const scope = await readJSON(path.join(f.dir, "job-1.scope.json"));
+  assert.deepEqual(Object.keys(scope.files).sort(), [
+    "a/index.mjs",
+    "b/index.mjs",
+  ]);
+});
+
+test("read-only child roles reject raw source, shell and edit tools", async (t) => {
+  for (const role of ["task_lead", "reviewer", "oracle"]) {
+    const f = await child(t, { role });
+    await f.emit("input", { text: `${MARKER}job-1\nWork` });
+    for (const toolName of [
+      "read",
+      "write",
+      "edit",
+      "bash",
+      "unknown_extension_tool",
+    ])
+      assert.equal((await f.emit("tool_call", { toolName })).block, true);
+  }
 });

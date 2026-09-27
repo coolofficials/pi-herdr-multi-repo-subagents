@@ -17,3 +17,17 @@ export async function writeJSON(file, value) {
   });
   await fs.rename(temp, file);
 }
+
+// Serialize a session's read-modify-write evidence updates even when Pi executes tools in parallel.
+export function serialExecutor() {
+  let tail = Promise.resolve();
+  /** @template T @param {() => Promise<T>} operation @returns {Promise<T>} */
+  return function run(operation) {
+    const result = tail.then(operation);
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+}

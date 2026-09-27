@@ -54,7 +54,7 @@ Use an optional `pi-herdr.json` at the root for unusual layouts:
 
 Paths are literal paths relative to the root, not globs. `include` replaces automatic traversal and can select nested repositories. Resolved paths must remain below the root. Optional settings: `maxDepth` (1–32), `layout` (`tabs` or `split`), `direction` (`right` or `down` for splits), `model` (`provider/model`), and `thinking`. `documents` is an exact allowlist of up to 30 relative `.md`/`.txt` task metadata files; defaults are `AGENTS.md` and `todo-tracker.md`. Code repositories, links, VCS internals and generated/dependency paths cannot be accessed through the task-document tool. Configure additional documents yourself; the Orchestrator cannot rewrite its access configuration. By default children inherit the coordinator's model and thinking level. These settings contain execution preferences, not AGENTS.md policies.
 
-## Hierarchy (v0.6.0)
+## Hierarchy (v0.6.1)
 
 ```text
 Orchestrator (requirements and overall coordination)
@@ -144,11 +144,13 @@ Snapshots include tracked and non-ignored untracked files for Git/colocated jj. 
 
 Finish old work before restarting Pi. Earlier role-switching or hierarchy sessions are **not automatically migrated**. Start a fresh main process/conversation with a concise handoff. This installed local checkout is loaded on restart; `/reload` may retain imported modules. The local `pre-consistency-v0.5.0` bookmark preserves the source before these changes. Do not hot-reload this update into active work.
 
-Configured TypeScript checking and formatting are the only current checks. `checkJs` is disabled globally; compilation is not exhaustive checking of the JavaScript modules. Existing unit/live-model harnesses target earlier contracts and have **not been migrated or run for v0.6.0**. Historical lifecycle results do not validate nested recovery, input classification or approval dependency reuse. No runtime/cost claim follows from compilation.
+v0.6.1 fixes a live-discovered race: parallel Reviewer/Oracle inspection tools could overwrite each other's coverage records, causing a false missing-inspection rejection and unnecessary re-review. A per-session queue now serializes evidence updates and PASS validation.
+
+Automated tests cover lifecycle controls, role restrictions, pending Lead reports, input classification, approval dependencies, parallel inspection and interrupted recovery retry. TypeScript and formatting checks are also configured; `checkJs` remains disabled globally. Real Pi/Herdr checks use generated fixtures on a dedicated named server. They exercise hierarchical completion, unrelated-file approval reuse, final Oracle, direct Lead input, missing reports, nested recovery and parent-exit draining. These small-fixture checks do not establish general review quality or cost savings.
 
 ## Session lifecycle
 
-Process identity still owns each family. Task Leads have separate coordination scopes and immediate child registries; every descendant also observes ancestor identities. Root exit prevents new work throughout the tree. Busy leaves finish accepted jobs and save results; Leads drain accepted children and record interrupted coordination before exiting. Lead exit drains its own subtree. No new process automatically adopts an old family. Nested behavior is implemented but not runtime-verified in v0.6.0.
+Process identity still owns each family. Task Leads have separate coordination scopes and immediate child registries; every descendant also observes ancestor identities. Root exit prevents new work throughout the tree. Busy leaves finish accepted jobs and save results; Leads drain accepted children and record interrupted coordination before exiting. Lead exit drains its own subtree. No new process automatically adopts an old family. Nested draining and recovery have been exercised in isolated real Pi/Herdr sessions; no exact shutdown deadline is promised.
 
 | Event                                                           | Behavior                                                                                                              |
 | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
@@ -184,9 +186,11 @@ This is coordination with model-tool restrictions, not an OS sandbox. Implemente
 ```sh
 npm ci
 npm run typecheck
+npm test
+npm run format:check
 ```
 
-Migrate the existing tests/live harnesses to the v0.6 contract before running them or packaging a release. `npm pack` runs the prepack checks, including those tests.
+`npm run test:live -- TASK_ROOT EVIDENCE_DIRECTORY` runs the current hierarchy scenario inside a dedicated Herdr pane against a fresh `create-demo.mjs` fixture. It starts actual model sessions using installed Pi settings, retains panes/evidence, and checks two task approvals, approval reuse, final Oracle and bounded manager permissions. Use a separate named Herdr test server; close only the test-owned processes afterward. The saved launch prevents blind resubmission on retry. `npm pack` runs prepack checks, including unit tests; it does not run model-backed live tests.
 
 The package has no runtime dependencies beyond Pi-provided peers. `pi` manifest paths and an npm file allowlist limit the archive to the extension, documentation, license and example generator. Do not publish without selecting your own package ownership and version.
 
@@ -204,4 +208,4 @@ The generator refuses an existing project directory. It creates a metadata jj re
 
 [pi-herdr-subagents](https://github.com/0xRichardH/pi-herdr-subagents/tree/7180d986a712e7627986a147ca8e5d5a4e0265da) was reviewed for lifecycle separation and asynchronous delivery ideas. This implementation is independent and does not install that package, include its agent bundles, or route to other harnesses.
 
-The scripts under `scripts/test-live.mjs` and `scripts/test-lifecycle-live.mjs` describe historical v0.3/v0.4 scenarios. They require migration to the hierarchy before use. Future verification must use a dedicated named Herdr session and isolated fixture, covering both approval levels, question/refinement/escalation receipts, unrelated-file approval reuse, changed dependencies, nested recovery/retry, missing Lead reports, same-checkout serialization, re-review and ancestor shutdown. Do not point such scripts at ongoing work.
+`scripts/test-live.mjs` and `scripts/test-lifecycle-live.mjs` are historical v0.3/v0.4 harnesses, retained as references. Do not execute them against the current role contracts or ongoing work. The current entry point is `scripts/test-hierarchy-live.mjs`. Destructive lifecycle scenarios require a dedicated disposable fixture and test process identities; never target a user's working family.

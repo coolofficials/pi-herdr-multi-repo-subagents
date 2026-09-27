@@ -1,6 +1,6 @@
 {
   "name": "pi-herdr-multi-repo-subagents",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Delegate repository work to visible Pi sessions in Herdr panes.",
   "type": "module",
   "license": "MIT",
@@ -44,6 +44,6 @@
     "typecheck": "tsc --noEmit",
     "prepack": "npm run typecheck && npm test && npm run format:check",
     "format:check": "prettier --check src test scripts package.json README.md tsconfig.json",
-    "test:live": "node scripts/test-live.mjs"
+    "test:live": "node scripts/test-hierarchy-live.mjs"
   }
 }

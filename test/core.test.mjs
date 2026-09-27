@@ -142,7 +142,7 @@ async function controlled(t, opts = {}) {
 test("start uses returned pane, repository cwd, argv strings and no focus; duplicate repo rejected", async (t) => {
   const { controller, calls } = await controlled(t);
   const value = await controller.start({
-    role: "explorer",
+    role: "scout",
     repo: "repos/api",
     task: "Literal $(touch /tmp/nope) `command`",
     model: "provider/model",
@@ -155,14 +155,14 @@ test("start uses returned pane, repository cwd, argv strings and no focus; dupli
   const start = calls.find((x) => x[1] === "start");
   assert.equal(start[start.indexOf("--pane") + 1], value.pane);
   await assert.rejects(
-    controller.start({ role: "explorer", repo: "repos/api", task: "second" }),
-    /already has agent/,
+    controller.start({ role: "scout", repo: "repos/api", task: "second" }),
+    /already serves this scope/,
   );
 });
 test("durable report survives controller reload; next prompt has a new job and no stale report", async (t) => {
   const { controller, calls } = await controlled(t);
   const first = await controller.start({
-    role: "explorer",
+    role: "scout",
     repo: "repos/api",
     task: "first",
   });
@@ -191,7 +191,7 @@ test("durable report survives controller reload; next prompt has a new job and n
 test("uncertain submission remains registered and is never retried automatically", async (t) => {
   const { controller, calls } = await controlled(t, { failPrompt: true });
   await assert.rejects(
-    controller.start({ role: "explorer", repo: "repos/api", task: "test" }),
+    controller.start({ role: "scout", repo: "repos/api", task: "test" }),
     /Submission may have happened/,
   );
   const [record] = await controller.records();
@@ -205,7 +205,7 @@ test("uncertain submission remains registered and is never retried automatically
 test("working and blocked agents reject followup; read returns blocked without claiming success", async (t) => {
   const { controller, live } = await controlled(t);
   const value = await controller.start({
-    role: "explorer",
+    role: "scout",
     repo: "repos/api",
     task: "test",
   });
@@ -217,8 +217,8 @@ test("working and blocked agents reject followup; read returns blocked without c
 test("concurrent starts cannot write competing registry entries", async (t) => {
   const { controller } = await controlled(t);
   const results = await Promise.allSettled([
-    controller.start({ role: "explorer", repo: "repos/api", task: "a" }),
-    controller.start({ role: "explorer", repo: "repos/api", task: "b" }),
+    controller.start({ role: "scout", repo: "repos/api", task: "a" }),
+    controller.start({ role: "scout", repo: "repos/api", task: "b" }),
   ]);
   assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
   assert.equal((await controller.records()).length, 1);
@@ -226,7 +226,7 @@ test("concurrent starts cannot write competing registry entries", async (t) => {
 test("forget preserves active pane; unavailable reports remain readable", async (t) => {
   const { controller, live } = await controlled(t);
   const value = await controller.start({
-    role: "explorer",
+    role: "scout",
     repo: "repos/api",
     task: "test",
   });
@@ -278,12 +278,12 @@ test("explicit tabs preserve independent starts and distinct job identities", as
     return transport(args, opts);
   };
   const a = await controller.start({
-    role: "explorer",
+    role: "scout",
     repo: "repos/api",
     task: "A",
   });
   const b = await controller.start({
-    role: "explorer",
+    role: "scout",
     repo: "repos/web",
     task: "B",
   });
@@ -298,7 +298,7 @@ test("explicit tabs preserve independent starts and distinct job identities", as
 test("reset waits for idle and fresh session evidence, then submits a distinct task", async (t) => {
   const { controller, calls } = await controlled(t);
   const a = await controller.start({
-    role: "explorer",
+    role: "scout",
     repo: "repos/api",
     task: "A",
   });
@@ -340,12 +340,12 @@ test("reset waits for idle and fresh session evidence, then submits a distinct t
 test("invalid work is rejected before creating a pane or resetting a session", async (t) => {
   const { controller, calls } = await controlled(t);
   await assert.rejects(
-    controller.start({ role: "explorer", repo: "repos/api", task: " " }),
+    controller.start({ role: "scout", repo: "repos/api", task: " " }),
     /empty/,
   );
   await assert.rejects(
     controller.start({
-      role: "explorer",
+      role: "scout",
       repo: "repos/api",
       task: "x".repeat(48001),
     }),
@@ -356,7 +356,7 @@ test("invalid work is rejected before creating a pane or resetting a session", a
 test("reset tolerates Herdr unknown state while the fresh Pi session initializes", async (t) => {
   const { controller, live } = await controlled(t);
   const started = await controller.start({
-    role: "explorer",
+    role: "scout",
     repo: "repos/api",
     task: "first",
   });
@@ -398,17 +398,17 @@ test("reset tolerates Herdr unknown state while the fresh Pi session initializes
 test("recovery refuses live child and preserves crash evidence after confirmed death", async (t) => {
   const { controller, live } = await controlled(t);
   const first = await controller.start({
-    role: "explorer",
+    role: "scout",
     repo: "repos/api",
     task: "work",
   });
   const record = await controller.record(first.id);
-  await assert.rejects(controller.recover("repos/api"), /alive or unknown/);
+  await assert.rejects(controller.recover(first.id), /alive or unknown/);
   live.delete(first.id);
   await writeJSON(path.join(record.dir, "ready.json"), {
     instance: { ...processIdentity(), started: "old incarnation" },
   });
-  const recovered = await controller.recover("repos/api");
+  const recovered = await controller.recover(first.id);
   assert.equal(recovered.status, "recovered");
   assert.equal((await controller.records()).length, 0);
   assert.ok(await readJSON(path.join(record.dir, "recovered.json")));
@@ -418,7 +418,7 @@ test("recovery refuses live child and preserves crash evidence after confirmed d
 test("detached child cannot be reset or receive follow-up", async (t) => {
   const { controller } = await controlled(t);
   const first = await controller.start({
-    role: "explorer",
+    role: "scout",
     repo: "repos/api",
     task: "work",
   });
@@ -439,4 +439,34 @@ test("detached child cannot be reset or receive follow-up", async (t) => {
     controller.reset({ id: first.id, task: "next", reason: "new task" }),
     /detached/,
   );
+});
+
+test("recovery retry repairs cleanup after registry removal and preserves interruption", async (t) => {
+  const { controller, live } = await controlled(t);
+  const first = await controller.start({
+    role: "scout",
+    repo: "repos/api",
+    task: "Inspect",
+  });
+  const record = await controller.record(first.id);
+  live.delete(first.id);
+  await writeJSON(path.join(record.dir, "ready.json"), {
+    instance: { ...processIdentity(), started: "exited instance" },
+  });
+  const original = controller.lifecycle.unreserve.bind(controller.lifecycle);
+  controller.lifecycle.unreserve = () => {
+    throw Error("simulated cleanup interruption");
+  };
+  await assert.rejects(controller.recover(first.id), /simulated cleanup/);
+  assert.equal((await controller.records()).length, 0);
+  assert.ok(controller.lifecycle.reservation(record.reservationKey));
+  controller.lifecycle.unreserve = original;
+  assert.equal((await controller.recover(first.id)).status, "recovered");
+  assert.equal(controller.lifecycle.reservation(record.reservationKey), null);
+  assert.equal(
+    (await readJSON(path.join(record.dir, first.jobId + ".result.json")))
+      .status,
+    "interrupted",
+  );
+  assert.equal((await controller.recover(first.id)).status, "recovered");
 });
