@@ -60,7 +60,7 @@ test("startup discovers repositories without a user command, model call, or agen
     recursive: true,
   });
   await handlers.get("session_start")({ reason: "startup" }, ctx);
-  assert.match(statuses.get("repo-discovery"), /Repos: 1/);
+  assert.match(statuses.get("repo-discovery"), /Orchestrator · 1 repos/);
   assert.equal(messages.length, 0);
   await fs.access(
     path.join(
@@ -130,7 +130,7 @@ test("automatic routing does not activate outside Herdr, in child sessions, or w
   );
   assert.deepEqual(event.systemPromptOptions.sections, {});
 });
-test("invalid discovery config does not break ordinary Pi turns", async (t) => {
+test("invalid discovery config reports the failure while withholding mutation tools", async (t) => {
   const { root, handlers, statuses, ctx } = await setup(t);
   await fs.writeFile(path.join(root, "pi-herdr.json"), "invalid JSON");
   await handlers.get("session_start")({ reason: "startup" }, ctx);

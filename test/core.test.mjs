@@ -142,6 +142,7 @@ async function controlled(t, opts = {}) {
 test("start uses returned pane, repository cwd, argv strings and no focus; duplicate repo rejected", async (t) => {
   const { controller, calls } = await controlled(t);
   const value = await controller.start({
+    role: "explorer",
     repo: "repos/api",
     task: "Literal $(touch /tmp/nope) `command`",
     model: "provider/model",
@@ -154,18 +155,23 @@ test("start uses returned pane, repository cwd, argv strings and no focus; dupli
   const start = calls.find((x) => x[1] === "start");
   assert.equal(start[start.indexOf("--pane") + 1], value.pane);
   await assert.rejects(
-    controller.start({ repo: "repos/api", task: "second" }),
+    controller.start({ role: "explorer", repo: "repos/api", task: "second" }),
     /already has agent/,
   );
 });
 test("durable report survives controller reload; next prompt has a new job and no stale report", async (t) => {
   const { controller, calls } = await controlled(t);
-  const first = await controller.start({ repo: "repos/api", task: "first" });
+  const first = await controller.start({
+    role: "explorer",
+    repo: "repos/api",
+    task: "first",
+  });
   const record = await controller.record(first.id);
   await writeJSON(path.join(record.dir, `${first.jobId}.result.json`), {
     jobId: first.jobId,
     status: "settled",
     summary: "completed first",
+    brief: { outcome: "completed", summary: "completed first" },
   });
   const reloaded = new Controller({
     root: controller.root,
@@ -174,7 +180,7 @@ test("durable report survives controller reload; next prompt has a new job and n
     transport: controller.transport,
   });
   assert.equal(
-    (await reloaded.read({ id: first.id })).report.summary,
+    (await reloaded.read({ id: first.id })).report.brief.summary,
     "completed first",
   );
   const next = await reloaded.prompt({ id: first.id, task: "second" });
@@ -185,7 +191,7 @@ test("durable report survives controller reload; next prompt has a new job and n
 test("uncertain submission remains registered and is never retried automatically", async (t) => {
   const { controller, calls } = await controlled(t, { failPrompt: true });
   await assert.rejects(
-    controller.start({ repo: "repos/api", task: "test" }),
+    controller.start({ role: "explorer", repo: "repos/api", task: "test" }),
     /Submission may have happened/,
   );
   const [record] = await controller.records();
@@ -198,7 +204,11 @@ test("uncertain submission remains registered and is never retried automatically
 });
 test("working and blocked agents reject followup; read returns blocked without claiming success", async (t) => {
   const { controller, live } = await controlled(t);
-  const value = await controller.start({ repo: "repos/api", task: "test" });
+  const value = await controller.start({
+    role: "explorer",
+    repo: "repos/api",
+    task: "test",
+  });
   live.get(value.id).status = "blocked";
   const result = await controller.read({ id: value.id });
   assert.equal(result.status, "blocked");
@@ -207,15 +217,19 @@ test("working and blocked agents reject followup; read returns blocked without c
 test("concurrent starts cannot write competing registry entries", async (t) => {
   const { controller } = await controlled(t);
   const results = await Promise.allSettled([
-    controller.start({ repo: "repos/api", task: "a" }),
-    controller.start({ repo: "repos/api", task: "b" }),
+    controller.start({ role: "explorer", repo: "repos/api", task: "a" }),
+    controller.start({ role: "explorer", repo: "repos/api", task: "b" }),
   ]);
   assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
   assert.equal((await controller.records()).length, 1);
 });
 test("forget preserves active pane; unavailable reports remain readable", async (t) => {
   const { controller, live } = await controlled(t);
-  const value = await controller.start({ repo: "repos/api", task: "test" });
+  const value = await controller.start({
+    role: "explorer",
+    repo: "repos/api",
+    task: "test",
+  });
   await assert.rejects(
     controller.forget({ id: value.id }),
     /exit was not cleanly/,
@@ -251,9 +265,9 @@ test("summary captures final answer only and usage, excludes thoughts and tool l
   assert.equal(output.usage.input, 20);
   assert.equal(output.usage.output, 7);
 });
-test("tabs are default, independent starts both work and use distinct job identities", async (t) => {
+test("explicit tabs preserve independent starts and distinct job identities", async (t) => {
   const { controller, root, calls } = await controlled(t);
-  await fs.unlink(path.join(root, "pi-herdr.json"));
+  await writeJSON(path.join(root, "pi-herdr.json"), { layout: "tabs" });
   const transport = controller.transport;
   controller.env.HERDR_WORKSPACE_ID = "w1";
   controller.transport = async (args, opts) => {
@@ -263,8 +277,16 @@ test("tabs are default, independent starts both work and use distinct job identi
     }
     return transport(args, opts);
   };
-  const a = await controller.start({ repo: "repos/api", task: "A" });
-  const b = await controller.start({ repo: "repos/web", task: "B" });
+  const a = await controller.start({
+    role: "explorer",
+    repo: "repos/api",
+    task: "A",
+  });
+  const b = await controller.start({
+    role: "explorer",
+    repo: "repos/web",
+    task: "B",
+  });
   assert.notEqual(a.id, b.id);
   assert.notEqual(a.jobId, b.jobId);
   assert.equal(
@@ -275,7 +297,11 @@ test("tabs are default, independent starts both work and use distinct job identi
 });
 test("reset waits for idle and fresh session evidence, then submits a distinct task", async (t) => {
   const { controller, calls } = await controlled(t);
-  const a = await controller.start({ repo: "repos/api", task: "A" });
+  const a = await controller.start({
+    role: "explorer",
+    repo: "repos/api",
+    task: "A",
+  });
   const rec = await controller.record(a.id);
   await assert.rejects(
     controller.reset({ id: a.id, reason: "new goal", task: "B" }),
@@ -314,18 +340,26 @@ test("reset waits for idle and fresh session evidence, then submits a distinct t
 test("invalid work is rejected before creating a pane or resetting a session", async (t) => {
   const { controller, calls } = await controlled(t);
   await assert.rejects(
-    controller.start({ repo: "repos/api", task: " " }),
+    controller.start({ role: "explorer", repo: "repos/api", task: " " }),
     /empty/,
   );
   await assert.rejects(
-    controller.start({ repo: "repos/api", task: "x".repeat(48001) }),
-    /48000/,
+    controller.start({
+      role: "explorer",
+      repo: "repos/api",
+      task: "x".repeat(48001),
+    }),
+    /16000/,
   );
   assert.equal(calls.length, 0);
 });
 test("reset tolerates Herdr unknown state while the fresh Pi session initializes", async (t) => {
   const { controller, live } = await controlled(t);
-  const started = await controller.start({ repo: "repos/api", task: "first" });
+  const started = await controller.start({
+    role: "explorer",
+    repo: "repos/api",
+    task: "first",
+  });
   const record = await controller.record(started.id);
   await writeJSON(path.join(record.dir, `${started.jobId}.result.json`), {
     status: "settled",
@@ -363,7 +397,11 @@ test("reset tolerates Herdr unknown state while the fresh Pi session initializes
 
 test("recovery refuses live child and preserves crash evidence after confirmed death", async (t) => {
   const { controller, live } = await controlled(t);
-  const first = await controller.start({ repo: "repos/api", task: "work" });
+  const first = await controller.start({
+    role: "explorer",
+    repo: "repos/api",
+    task: "work",
+  });
   const record = await controller.record(first.id);
   await assert.rejects(controller.recover("repos/api"), /alive or unknown/);
   live.delete(first.id);
@@ -379,7 +417,11 @@ test("recovery refuses live child and preserves crash evidence after confirmed d
 
 test("detached child cannot be reset or receive follow-up", async (t) => {
   const { controller } = await controlled(t);
-  const first = await controller.start({ repo: "repos/api", task: "work" });
+  const first = await controller.start({
+    role: "explorer",
+    repo: "repos/api",
+    task: "work",
+  });
   const record = await controller.record(first.id);
   await writeJSON(path.join(record.dir, `${first.jobId}.result.json`), {
     status: "settled",

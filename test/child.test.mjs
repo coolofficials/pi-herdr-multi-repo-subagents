@@ -31,6 +31,9 @@ async function child(t, options = {}) {
   childBridge({
     on: (name, fn) => handlers.set(name, fn),
     registerFlag() {},
+    registerTool() {},
+    setSessionName() {},
+    getAllTools: () => tools.map((name) => ({ name })),
     getFlag: () =>
       options.noFlag ? undefined : JSON.stringify({ dir, token: "launch" }),
     getActiveTools: () => tools,
@@ -77,6 +80,9 @@ test("child captures at settled, not agent_end, and retains language from the mo
   });
   await emit("agent_end", { messages: [] });
   assert.equal(await readJSON(path.join(dir, "job-1.result.json")), null);
+  await writeJSON(path.join(dir, "job-1.brief.json"), {
+    brief: { outcome: "completed", summary: "작업 완료" },
+  });
   await emit("agent_before_settle", { outcome: "completed" });
   await emit("agent_settled");
   const report = await readJSON(path.join(dir, "job-1.result.json"));

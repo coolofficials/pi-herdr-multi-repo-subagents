@@ -132,7 +132,7 @@ const started = path.join(evidence, "drain-started"),
   release = path.join(evidence, "drain-release"),
   done = path.join(evidence, "drain-done");
 const code = `const fs=require('fs');fs.writeFileSync(${JSON.stringify(started)},'started');const deadline=Date.now()+180000;while(!fs.existsSync(${JSON.stringify(release)})){if(Date.now()>deadline)throw Error('test release timeout');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,200);}fs.writeFileSync(${JSON.stringify(done)},'done');`;
-const task = `Authorized lifecycle test. Use repo_agent_prompt exactly once for ${backend.id}. Ask that child to run this Node script using bash and wait for it to finish, then reply DRAIN-DONE: ${code} . Do not run the script yourself. Leave frontend idle. After submitting the child task, end your turn with DRAIN-DISPATCHED. Do not wait or poll.`;
+const task = `Authorized lifecycle test. Create a new repo_work bundle for repos/backend with this process-drain scenario as acceptance criteria. Reset ${backend.id} to implementer with that bundle and a handoff. Ask that child to run this Node script using bash and wait for it to finish, then submit repo_agent_report with summary DRAIN-DONE and end with DRAIN-DONE: ${code} . Do not run the script yourself. Leave frontend idle. After submitting the child task, end your turn with DRAIN-DISPATCHED. Do not wait or poll.`;
 await herdr(["agent", "prompt", first.coordinator, task]);
 await until(
   "child started actual blocking tool",
@@ -179,7 +179,7 @@ await herdr([
   "agent",
   "prompt",
   nextName,
-  "This is the final lifecycle smoke test. Delegate only repos/backend with repo_agent_start and ask it to reply IDLE-CHILD-READY without tools or file edits. Do not work on frontend. Wait for automatic completion; after the child report, reply IDLE-TEST-READY.",
+  "This is the final lifecycle smoke test. Delegate only repos/backend with repo_agent_start role=explorer and ask it to submit repo_agent_report summary IDLE-CHILD-READY and end its turn without file edits. Do not work on frontend. Wait for automatic completion; after the child report, reply IDLE-TEST-READY.",
 ]);
 const nextChild = await until(
   "new child completed",

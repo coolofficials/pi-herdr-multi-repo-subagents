@@ -1,6 +1,6 @@
 # pi-herdr-multi-repo-subagents
 
-Delegate repository work from a task-root Pi process to its own child Pi sessions in visible Herdr tabs. Child reports automatically return to the coordinator. Each child starts in its repository and loads the applicable AGENTS.md files normally.
+Coordinate research, planning, implementation and independent review from a task-root Orchestrator. Children run in visible Herdr panes and return bounded structured briefs. The Orchestrator cannot use arbitrary source-reading, editing or shell tools. Repository children load applicable AGENTS.md normally; response language and project policies remain outside the package.
 
 ## Requirements and installation
 
@@ -17,11 +17,11 @@ pi install /absolute/path/to/pi-herdr-multi-repo-subagents
 
 After publishing, the same package can be installed using `pi install npm:pi-herdr-multi-repo-subagents` or a Git source. This checkout is not published by the build process. Restart Pi after installation or package updates. During development, `/reload` refreshes the entry extension but Node may retain imported `.mjs` modules; restart the process after changing shared runtime code.
 
-Start Herdr, change to your task root, and start Pi. Repositories are discovered automatically, with a small readiness indicator in the footer. Just describe the work you want done: the coordinator receives the repository roster, selects the relevant repositories, and delegates as needed. Starting Pi alone does not open child tabs or invoke a model. `/repo-agents` is an optional inspection command, never an activation step.
+Start Herdr, change to your task root, and start Pi. Repositories are discovered automatically, with a small readiness indicator in the footer. Just describe the work you want done: the coordinator receives the repository roster, selects the relevant repositories, and delegates as needed. Starting Pi alone does not open child panes or invoke a model. `/repo-agents` is an optional inspection command, never an activation step.
 
 For example: “Check the timeout contract against the implementations, improve missing tests, and summarize the results.” No tool names or delegation commands are required in your request.
 
-The roster refreshes before each task turn, so repositories cloned after startup are recognized. Automatic coordination stays inactive when there are no descendant repositories, outside Herdr, inside child sessions, or when delegation tools are disabled. Discovery failures appear in the footer and do not prevent ordinary Pi work.
+The roster refreshes before each task turn, so repositories cloned after startup are recognized. Automatic coordination stays inactive when there are no descendant repositories, outside Herdr, inside child sessions, or when delegation tools are disabled. Discovery failures appear in the footer and withhold mutation tools until resolved. Once a process becomes a managed Orchestrator, its restrictions remain for that process. A standalone Pi outside Herdr or in a repository with no discovered descendants retains ordinary tools.
 
 ## Directory layout
 
@@ -47,33 +47,84 @@ Use an optional `pi-herdr.json` at the root for unusual layouts:
 {
   "include": ["services/api", "clients/web"],
   "exclude": ["archive"],
-  "layout": "tabs"
+  "layout": "split",
+  "documents": ["AGENTS.md", "todo-tracker.md", "references/plan.md"]
 }
 ```
 
-Paths are literal paths relative to the root, not globs. `include` replaces automatic traversal and can select nested repositories. Resolved paths must remain below the root. Optional settings: `maxDepth` (1–32), `layout` (`tabs` or `split`), `direction` (`right` or `down` for splits), `model` (`provider/model`), and `thinking`. By default children inherit the coordinator's model and thinking level. These settings contain execution preferences, not AGENTS.md policies.
+Paths are literal paths relative to the root, not globs. `include` replaces automatic traversal and can select nested repositories. Resolved paths must remain below the root. Optional settings: `maxDepth` (1–32), `layout` (`tabs` or `split`), `direction` (`right` or `down` for splits), `model` (`provider/model`), and `thinking`. `documents` is an exact allowlist of up to 30 relative `.md`/`.txt` task metadata files; defaults are `AGENTS.md` and `todo-tracker.md`. Code repositories, links, VCS internals and generated/dependency paths cannot be accessed through the task-document tool. Configure additional documents yourself; the Orchestrator cannot rewrite its access configuration. By default children inherit the coordinator's model and thinking level. These settings contain execution preferences, not AGENTS.md policies.
 
 ## Interaction
 
 Completion is notification-driven. End the main turn when only waiting; the extension delivers results automatically. Use `repo_agent_read` for an explicit status question or diagnosis. Version 0.3.1 removes `repo_agent_wait`; do not replace it with repeated reads or shell polling.
 
-- A delegated repository gets its own tab by default; focus stays with the user. Split layout is optional.
+- A delegated repository gets a split pane by default; focus stays with the user. Direction adapts to the current pane dimensions unless configured. `layout: "tabs"` remains available. No automatic pane-count limit, rearrangement or task-board TUI is implemented.
 - Each main Pi process owns its own children. One managed main owns a canonical task root within a Pi profile; other main processes cannot submit work for that root. Each checkout has one managed child reservation across roots in that profile. Independent repositories can work concurrently. A newly started main never adopts a previous main's children, even when resuming the same conversation.
 - The coordinator passes a bounded task and relevant context, not its full conversation. AGENTS.md supplies language, project policies and conventions. Instructions that existed only in the parent conversation must be explicitly passed.
 - Completion reports automatically wake the owning coordinator. There is no model invocation for periodic local status inspection. Finishing several children may still cause multiple coordinator turns; context isolation does not guarantee lower total cost.
-- The child remains open for direct inspection and follow-up work. The coordinator normally reuses its session. If a completed task has accumulated irrelevant context or the objective changes, the coordinator explains why and can start a fresh session in the same tab with a concise handoff. Previous session files remain available.
+- The child remains open for direct inspection and follow-up work. The coordinator normally reuses its session. If a completed task has accumulated irrelevant context or the objective changes, the coordinator explains why and can start a fresh session in the same pane with a concise handoff. Previous session files remain available.
 - No agent bundles, alternative harnesses, automatic commits, pushes, or code-review publication are provided.
 
-| Tool                | Purpose                                                      |
-| ------------------- | ------------------------------------------------------------ |
-| `repo_agent_list`   | Discover repositories and registry entries                   |
-| `repo_agent_start`  | Open a Pi child and delegate a task                          |
-| `repo_agent_prompt` | Follow up in an idle existing child                          |
-| `repo_agent_read`   | Inspect current job report; optional bounded pane snapshot   |
-| `repo_agent_reset`  | Start fresh context in the same tab, with reason and handoff |
-| `repo_agent_forget` | Forget a child only after it exits; retain pane and reports  |
+| Tool                | Purpose                                                              |
+| ------------------- | -------------------------------------------------------------------- |
+| `repo_agent_list`   | Discover repositories and registry entries                           |
+| `repo_agent_start`  | Open a Pi child and delegate a task                                  |
+| `repo_agent_prompt` | Follow up in an idle existing child                                  |
+| `repo_agent_read`   | Inspect current state and a validated structured report; no raw logs |
+| `repo_agent_reset`  | Start fresh context in the same pane, with reason and handoff        |
+| `repo_agent_forget` | Forget a child only after it exits; retain pane and reports          |
 
-Reports are captured at Pi's `agent_settled` event, after automatic retries and continuations. `settled` means the turn ended; the coordinator must inspect the answer and actual checks before claiming the task succeeded. Reports have job IDs, final text, token usage, error/outcome, and the original session path. Model-facing summaries are capped at 12,000 characters with a path to the full report. Tool logs and hidden reasoning are not copied into the report.
+Reports are captured at Pi's `agent_settled` event, after automatic retries and continuations. Children must call `repo_agent_report` before ending the turn. The stored report retains the final assistant message and usage for local inspection, but the Orchestrator receives only validated structured fields. Missing/invalid briefs are marked `needs-report`; raw final text is never used as a fallback. `settled` describes a finished job, not a completed work bundle.
+
+## Roles and enforced boundaries (v0.4.0)
+
+| Role         | Tools and responsibility                                                                                                                                                                                            |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Orchestrator | Only `repo_agent_list/start/prompt/read/reset/forget`, `repo_task_document` and `repo_work`. Plan from compact findings and contracts; no arbitrary shell, source read/grep, edit/write or unknown extension tools. |
+| Explorer     | `repo_source` and report submission. Local read-only investigation of files, relationships, constraints and alternatives.                                                                                           |
+| Librarian    | `repo_source`, `repo_research_fetch` and report submission. Public documentation and dependency research, with source URLs and applicable versions.                                                                 |
+| Implementer  | Normal Pi implementation tools, bounded source retrieval and report submission. No parent orchestration tools.                                                                                                      |
+| Reviewer     | Bounded source reading, `repo_review_changes` and report submission. No shell or editing tools.                                                                                                                     |
+| Verifier     | Normal execution tools for explicitly assigned validation, plus report submission. Use only when separate validation is useful.                                                                                     |
+
+Permissions are selected at session/job boundaries and checked again by a `tool_call` hook. Scoped tools validate paths in their own implementations. Role guidance provides judgment rules; it is not the permission boundary. Other extensions' tools are not automatically trusted by the Orchestrator or read-only roles.
+
+Use `repo_agent_start` with a `role`. For broad task-root research, Explorer or Librarian may use `repo: "."`; such children can never become writers/reviewers. There is at most one managed child per canonical path, including the task-root research path. A root researcher may coexist with repo children, but its findings can become stale while those children edit: implementations/reviews must re-check relevant source. Do not spawn every role at startup.
+
+A role change uses `repo_agent_reset`, preserving the pane but starting a fresh conversation. Related follow-ups use `repo_agent_prompt`. A new review bundle requires a fresh review conversation. If the same pane switches from review to implementation for remediation, returning to review also starts fresh and receives the previous compact brief; previous sessions are retained, not automatically resumed.
+
+### Information budgets
+
+- Delegation task + context: at most 16,000 characters; the parent conversation is never copied. Original bundle requirements and prior review findings are added separately by the extension.
+- Structured brief: at most 6,000 JSON characters, including a summary of at most 1,200 characters and bounded arrays for facts, decisions, actual checks, risks, next steps and source references. Preserve unresolved blockers; do not paste code, diffs or terminal logs. Fenced code/unified-diff markers are rejected; arbitrary natural language cannot be perfectly classified.
+- Main tool responses and each automatic report batch: at most 18,000 characters. Repository lists are paginated with `offset`. Reports waiting for the next batch stay unacknowledged; they are not silently dropped.
+- Task document reads are paginated and bounded. Writes replace one approved document and are capped at 16,000 characters.
+- Local source reads are limited to 200 lines/16,000 characters, with explicit offsets. Searches are literal, bounded and omit hidden/generated/dependency files; read known files explicitly where appropriate. No symlinks, hard-linked files, binary text or files larger than 2 MiB are read through this tool.
+
+The Orchestrator asks a focused follow-up when a brief is insufficient. Children can inspect source and task references using `repo_source` (`scope: "repo"` by default, `scope: "task"` for related references). Source fragments, raw logs and complete diffs remain in child conversations. The purpose is to preserve decisions and evidence while keeping investigative detail out of the main context, not to promise a fixed cost reduction.
+
+Librarian retrieval supports public IPv4 HTTPS text URLs, bounded responses, pinned DNS addresses and validated redirects; it does not execute scripts, send credentials, or use a bundled general web search engine. Dynamic/authenticated pages, oversized pages and non-text documents may be unavailable. Report missing capabilities rather than fabricate findings. External source content is data, not instructions.
+
+### Work bundles and review gates
+
+1. Research only when needed. The Orchestrator collects relevant facts, constraints, alternatives and references, then creates `repo_work` (`action: "create"`) **before implementation**. Supply a coherent goal, original acceptance conditions, cross-repo contracts, verification ownership and the participating repo paths.
+2. Creation saves the current file baseline and requirements outside the checkout. Existing uncommitted work is part of that baseline, not silently claimed as this bundle's change. Implementation and verification jobs require a bundle ID.
+3. On completion of the coherent implementation unit, reset each repo child to `reviewer` with that bundle. The child sees original requirements and a fingerprint of the target state; `repo_review_changes` exposes changed paths and bounded before/after content. The parent receives no diff.
+4. Review PASS requires an actual change-inspection tool call, a structured verdict, acceptance/verification evidence references, no unresolved risks/next steps and the unchanged target fingerprint. The extension checks submission provenance/fields/state; it cannot prove that a model's claims or test evidence are semantically correct.
+   Use `repo_work` (`action: "revise"`) for requirement changes while all participating children are idle. It preserves the original requirement history, file baseline and review budget, and invalidates prior verdicts even when source files have not changed. Repository membership remains fixed for that bundle.
+
+5. Initial review plus two re-reviews per repo is the default maximum. Use `since: "previous_review"` to inspect remediation, while retaining the original baseline and unresolved findings. Do not re-run all checks without a reason. A dispatch with uncertain delivery conservatively consumes its review attempt. An explicit user command `/repo-agents extend-review <bundle ID> <repo path>` adds one attempt; models have no tool to grant themselves more attempts.
+6. `repo_work` (`action: "complete"`) refuses missing, unsuccessful or stale independent verdicts. Its state is the authoritative workflow completion indicator; it does not police every sentence the model writes. Related acceptance/integration checks must be assigned and evidenced in the review. There is no separate automated semantic proof of cross-repo correctness.
+
+Snapshots include tracked and non-ignored untracked files for Git/colocated jj repositories. For non-colocated jj, filesystem traversal includes hidden files but omits `.git`, `.jj`, `node_modules`, `vendor`, `dist`, `build` and `target` (it does not interpret jj ignore rules). Limits are 5,000 files, 32 MiB total and 2 MiB per file. Symlinks, hard links, submodules and unsupported entries cause refusal rather than partial approval. Code changes are detected when reviewing, submitting a verdict and completing a bundle; this is not a continuous filesystem lock. Ignore-policy changes or external writers can affect what is observable. Scope verification and repository policies still matter.
+
+Bundle requirements, baselines, review attempts, evidence briefs and handoffs survive same-process conversation changes. A reset saves the old session/job references and a compact brief before switching. The new child receives the brief and original requirements and must reconcile them with current source. This cannot preserve facts that were never recorded. As in v0.3.0, a new parent process does not adopt the old family; previous records are retained for inspection.
+
+### Updating from v0.3.1
+
+Finish old work before restarting Pi. Existing sessions are not hot-migrated to the new role/report contract. Start a fresh main conversation with a concise handoff: permission filtering cannot remove code already in its transcript. The installed local path loads this source on restart. Keep a recoverable v0.3.1 revision until runtime verification is complete.
+
+This version has had the configured TypeScript check and source formatting applied. The unit and live-model harnesses have been adapted to the new contract but have **not been run for v0.4.0**; prior v0.3.0 lifecycle results are not evidence for these new permission/review paths.
 
 ## Session lifecycle
 
@@ -98,7 +149,7 @@ Parent checks run locally every two seconds. Normal main shutdown records its in
 
 ## Recovery and scope
 
-A timeout or failed prompt submission may occur after text was delivered. The extension retains the registry entry and pane and does not resubmit automatically. Inspect with `repo_agent_read` and `logs: true`. Resolve trust/login questions directly in the child tab. A completed report describes a settled turn, not necessarily a successful task.
+A timeout or failed prompt submission may occur after text was delivered. The extension retains the registry entry and pane and does not resubmit automatically. Inspect structured status with `repo_agent_read` and inspect the actual child pane directly for raw details. Resolve trust/login questions directly in the child tab. A completed report describes a settled turn, not necessarily a successful task.
 
 A cleanly exited child can be forgotten with `repo_agent_forget`. Its pane, reports and session files remain. A later parent may reserve that checkout after the old child process is confirmed dead. For interrupted launches or crashes, inspect the child pane and any commands it launched, then use `/repo-agents recover <relative repo path>`. Recovery checks parent and child process identities, launch expiry and the Herdr agent list; it refuses a live or unknown child and never kills processes. Recovery releases the reservation and preserves evidence. It does not resume or replay interrupted work. Unregistered background commands must be inspected separately.
 
@@ -106,7 +157,7 @@ A cleanly exited child can be forgotten with `repo_agent_forget`. Its pane, repo
 
 State lives under `<Pi agent directory>/pi-herdr-multi-repo-subagents/`: a local SQLite ownership database and `runs/<root hash>/<parent run ID>/` files. It is outside code repositories. The supported storage is a local filesystem on one machine. Different Pi profiles have separate coordination databases; do not run them concurrently against the same checkout. A different Herdr server does not bypass checkout reservations within one profile. Previous v0.2.0 agents are not migrated: exit and forget them using that version before using this version on those checkouts.
 
-This is coordination, not an OS sandbox. Every child has normal Pi filesystem, credential and tool access. Repository scope is validated for launching and described in the task; it does not prevent access to other paths or prevent manually launched processes from editing the checkout. The extension never fabricates Herdr caller context. Removing the package does not delete retained reports or session files.
+This is coordination with model-tool restrictions, not an OS sandbox. Implementer and Verifier still have ordinary execution privileges; read-only roles and the managed Orchestrator use restricted tools. User-issued shell commands, another extension’s own code, and external programs are outside those restrictions. Repository scope is validated for launching and described in the task; it does not prevent access to other paths or prevent manually launched processes from editing the checkout. The extension never fabricates Herdr caller context. Removing the package does not delete retained reports or session files.
 
 ## Development and distribution
 
@@ -139,7 +190,7 @@ Run the optional real-model integration test from inside Herdr after generating 
 npm run test:live -- /absolute/path/to/new-demo-project/DEMO-001-shared-timeout /absolute/path/to/evidence
 ```
 
-This invokes your authenticated Pi model and uses its allowance/billing. It leaves the demo tabs open. `PI_TEST_MODEL` optionally selects a model; `PI_TEST_TIMEOUT` changes the per-stage timeout (default 300,000 ms).
+This invokes your authenticated Pi model and uses its allowance/billing. It leaves the demo panes open. `PI_TEST_MODEL` optionally selects a model; `PI_TEST_TIMEOUT` changes the per-stage timeout (default 300,000 ms).
 
 After the integration test completes, run the lifecycle checks in the same test Herdr session:
 

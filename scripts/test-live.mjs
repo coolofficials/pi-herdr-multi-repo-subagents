@@ -63,7 +63,7 @@ if (savedStart) {
     session,
   });
 }
-const prompt = `This is an authorized live integration test in a generated fixture. Read AGENTS.md and references/timeout-contract.md. Discover repositories with repo_agent_list. Delegate implementation, npm test and npm run build to separate backend and frontend Pi agents using repo_agent_start; do not implement their code yourself. Start both before waiting. Let automatic notifications resume you; do not write polling loops or repeatedly call wait. After both reports, use repo_agent_prompt on backend to review the diff and add/test the 0ms boundary case. Once its follow-up report arrives, verify the two modules together from the task root: retryLabel(timeoutResponse(1250)) must equal 'Retry in 1250 ms'. Update todo-tracker.md according to applicable instructions. Keep all child tabs open. End with DEMO-INTEGRATION-COMPLETE.`;
+const prompt = `This is an authorized live integration test in a generated fixture. Use repo_agent_list. Start an explorer in repos/backend to inspect AGENTS.md and references/timeout-contract.md with repo_source scope=task and return a structured research brief. End your turn for automatic completion. Plan from that brief and create a repo_work bundle covering repos/backend and repos/frontend with the contract, acceptance conditions, npm test/build checks and the cross-module check retryLabel(timeoutResponse(1250)) === 'Retry in 1250 ms'. Reset the backend child to implementer and start the frontend child as implementer with this bundle. Delegate implementation and assigned tests/build; do not read or edit source yourself. After both implementation reports, use repo_agent_prompt on backend to add/test the 0ms boundary and perform the cross-module verification. Then reset each child to reviewer with the same bundle in fresh conversations. Reviewers must inspect changes with repo_review_changes and submit evidence and verdict through repo_agent_report. Resolve material findings within the review budget. Complete the bundle with repo_work only after current-state independent reviews pass. Update todo-tracker.md via repo_task_document. Keep child panes open. End with DEMO-INTEGRATION-COMPLETE.`;
 if (!savedStart) await herdr(["agent", "prompt", name, prompt]);
 async function waitFor(marker) {
   const deadline = Date.now() + Number(process.env.PI_TEST_TIMEOUT ?? 300000);
@@ -119,7 +119,7 @@ if (!alreadyReset)
     "agent",
     "prompt",
     name,
-    "Test fresh-session handoff now. Explain why the completed implementation context can be replaced for an independent handoff review. Use repo_agent_reset for backend with a concise handoff, asking it only to read index.mjs/index.test.mjs and summarize current behavior and coverage, ending with RESET-CHILD-COMPLETE. Do not modify code. End your turn and let automatic reporting resume you. Once the report arrives, update the tracker and end with DEMO-RESET-COMPLETE.",
+    "Test fresh-session handoff now. Explain why the completed implementation context can be replaced for an independent handoff review. Use repo_agent_reset for backend with role=explorer, no bundle, and a concise handoff, asking it only to read index.mjs/index.test.mjs and summarize current behavior and coverage, ending with RESET-CHILD-COMPLETE. Do not modify code. End your turn and let automatic reporting resume you. Once the report arrives, update the tracker and end with DEMO-RESET-COMPLETE.",
   ]);
 const entries = await waitFor("DEMO-RESET-COMPLETE");
 const toolResults = entries.filter(
@@ -155,10 +155,9 @@ assert.ok(
   keys.length >= 1,
   "At least one completion must resume the parent automatically",
 );
-assert.equal(
-  consumed.size,
-  4,
-  "Both initial reports, follow-up and reset must be consumed exactly once",
+assert.ok(
+  consumed.size >= 7,
+  "Research, implementation, follow-up, independent reviews and fresh handoff must be consumed",
 );
 const tabs = await herdr([
   "tab",
