@@ -20,6 +20,7 @@ export const MAIN_TOOLS = new Set([
   "repo_agent_read",
   "repo_agent_reset",
   "repo_agent_forget",
+  "repo_agent_release",
   "repo_agent_recover",
   "repo_task_document",
   "repo_work",
@@ -27,12 +28,14 @@ export const MAIN_TOOLS = new Set([
   "repo_project",
 ]);
 export const LEAD_TOOLS = new Set([
+  "repo_checkpoint",
   "repo_agent_list",
   "repo_agent_start",
   "repo_agent_prompt",
   "repo_agent_read",
   "repo_agent_reset",
   "repo_agent_forget",
+  "repo_agent_release",
   "repo_agent_recover",
   "repo_work",
   "repo_request_review",
@@ -41,6 +44,9 @@ export const LEAD_TOOLS = new Set([
   "repo_agent_report",
 ]);
 export const CHILD_TOOLS = new Set([
+  "repo_check",
+  "repo_artifact",
+  "repo_checkpoint",
   "repo_source",
   "repo_research_fetch",
   "repo_agent_report",
@@ -125,7 +131,7 @@ export function roleGuidance(role) {
     reviewer:
       "Independently review the complete change against the original requirements. Use repo_review_changes to inspect the baseline, current changes and required files. Review real bugs, missing requirements and concrete risks. Do not implement. Re-reviews focus on unresolved findings and the impact of remediation; do not reopen unchanged accepted decisions. Changed files and repo_source reads become approval dependencies. Declare unobserved config/dynamic dependencies via repo_review_scope; choose wholeRepositories when the scope cannot be safely narrowed. Submit a verdict with repo_agent_report.",
   };
-  return `You are the ${role} in a process-owned repository workflow. ${responsibility[role]} Follow applicable AGENTS.md, including response language. For a final outcome call repo_agent_report with a compact structured brief, then end the turn. A task_lead awaiting children must instead end its turn without a final report. Raw code, diffs and logs stay in this conversation. Include source paths/URLs so another child can inspect the evidence. A completed job is not a reviewed work bundle. Only task_lead may delegate scoped children. After approved task completion, implementers exit to release checkout reservations; forget their exited records before starting replacement implementers if work is reopened. Other roles cannot spawn agents. Never change your own assigned role.`;
+  return `You are the ${role} in a process-owned repository workflow. ${responsibility[role]} Follow applicable AGENTS.md, including response language. For a final outcome call repo_agent_report with a compact structured brief, then end the turn. A task_lead awaiting children must instead end its turn without a final report. Raw code, diffs and logs stay in this child scope. Large native tool results are excerpts backed by repo_artifact; inspect necessary evidence before concluding. Prefer narrow reads/searches; do not repeatedly scan whole files. Use repo_checkpoint at a stable boundary when context is large; it preserves the same job and review budget. Include source paths/URLs so another child can inspect the evidence. A completed job is not a reviewed work bundle. Only task_lead may delegate scoped children. After approved task completion, implementers exit to release checkout reservations; forget their exited records before starting replacement implementers if work is reopened. Other roles cannot spawn agents. Never change your own assigned role.`;
 }
 export function publicReport(report) {
   if (!report) return null;

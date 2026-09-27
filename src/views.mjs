@@ -1,0 +1,321 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+import { readJSON, writeJSON } from "./storage.mjs";
+import { liveness } from "./lifecycle.mjs";
+import { executionState } from "./execution.mjs";
+const exec = promisify(execFile);
+const quote = (s) => "'" + s.replaceAll("'", "'\\''") + "'";
+const viewPath = (client, bundle) =>
+  path.join(client.workScope, "views", bundle + ".json");
+export async function familyRecords(scope) {
+  const parent = await readJSON(path.join(scope, "parent.json"));
+  const own = await readJSON(path.join(scope, "agents.json"), []);
+  const siblings = (
+    await fs
+      .readdir(path.dirname(scope), { withFileTypes: true })
+      .catch(() => [])
+  )
+    .filter((e) => e.isDirectory() && !e.isSymbolicLink())
+    .map((e) => e.name);
+  const children = [];
+  for (const name of siblings) {
+    const nested = path.join(path.dirname(scope), name);
+    if (nested === scope) continue;
+    const records = await readJSON(path.join(nested, "agents.json"), []);
+    for (const record of records) {
+      const launch = await readJSON(path.join(record.dir, "launch.json"));
+      if (
+        launch?.workScope === scope &&
+        launch.ancestors?.some(
+          (a) => a.identity.token === parent?.instance?.token,
+        )
+      )
+        children.push(record);
+    }
+  }
+  return [...own, ...children];
+}
+export async function createTaskPane(client, record, signal, environment) {
+  const key = record.bundle ?? record.id;
+  const file = viewPath(client, key);
+  const view = await readJSON(file);
+  let result;
+  if (view && !view.closed) {
+    const panes = (
+      await client.call(
+        ["pane", "list", "--workspace", client.env.HERDR_WORKSPACE_ID],
+        signal,
+      )
+    ).result?.panes;
+    if (!Array.isArray(panes)) throw Error("Cannot confirm task tab topology.");
+    let own = panes.filter((p) => p.tab_id === view.tab);
+    if (own.length >= 4) {
+      for (const old of await familyRecords(client.workScope)) {
+        if (
+          old.bundle !== record.bundle ||
+          !own.some((p) => p.pane_id === old.pane) ||
+          (await readJSON(path.join(old.dir, "keep.json")))?.keep
+        )
+          continue;
+        const state = await executionState(old);
+        if (
+          !state.pending &&
+          state.ready?.cleanExit &&
+          liveness(state.ready.instance) === "dead" &&
+          (await shellAvailable(client, old))
+        ) {
+          await client.call(["pane", "close", old.pane], signal);
+          await writeJSON(path.join(old.dir, "view-closed.json"), {
+            pane: old.pane,
+            at: new Date().toISOString(),
+          });
+          own = own.filter((p) => p.pane_id !== old.pane);
+          break;
+        }
+      }
+    }
+    if (own.length >= 4)
+      throw Error(
+        "TASK_VIEW_CAPACITY: task tab has 4 panes. Call repo_agent_release for a settled idle worker, then retry after its confirmed exit. Pinned/user panes are protected.",
+      );
+    const anchor = own.find((p) => p.pane_id === view.anchor) ?? own[0];
+    if (!anchor)
+      throw Error(
+        "Task tab was changed externally; inspect it before creating another.",
+      );
+    result = await client.call(
+      [
+        "pane",
+        "split",
+        "--pane",
+        anchor.pane_id,
+        "--direction",
+        own.length % 2 ? "right" : "down",
+        "--cwd",
+        record.path,
+        ...environment,
+        "--no-focus",
+      ],
+      signal,
+    );
+    record.tab = view.tab;
+  } else {
+    result = await client.call(
+      [
+        "tab",
+        "create",
+        "--workspace",
+        client.env.HERDR_WORKSPACE_ID,
+        "--label",
+        record.label,
+        "--cwd",
+        record.path,
+        ...environment,
+        "--no-focus",
+      ],
+      signal,
+    );
+    record.tab = result.result?.tab?.tab_id;
+    const pane = result.result?.root_pane?.pane_id;
+    if (!pane || !record.tab)
+      throw Error("Task tab creation returned incomplete identity.");
+    await writeJSON(file, {
+      bundle: key,
+      tab: record.tab,
+      anchor: pane,
+      closed: false,
+    });
+  }
+  return result;
+}
+export async function shellAvailable(client, record) {
+  const pane = (await client.call(["pane", "get", record.pane])).result?.pane;
+  if (
+    !pane ||
+    !record.terminal ||
+    pane.terminal_id !== record.terminal ||
+    pane.tab_id !== record.tab
+  )
+    return false;
+  const info = (
+    await client.call(["pane", "process-info", "--pane", record.pane])
+  ).result?.process_info;
+  if (
+    !info?.shell_pid ||
+    info.foreground_process_group_id !== info.shell_pid ||
+    !info.foreground_processes?.every((p) => p.pid === info.shell_pid)
+  )
+    return false;
+  // A shell prompt alone does not exclude a user-started background process.
+  const { stdout } = await exec("ps", ["-axo", "pid=,ppid="]);
+  if (
+    stdout
+      .trim()
+      .split("\n")
+      .some((line) => Number(line.trim().split(/\s+/)[1]) === info.shell_pid)
+  )
+    return false;
+  return true;
+}
+export async function maintainViews(client) {
+  if (client.delegation) return;
+  const records = await familyRecords(client.scope);
+  for (const record of records) {
+    if (
+      !record.tab ||
+      !record.terminal ||
+      record.viewClosed ||
+      (await readJSON(path.join(record.dir, "view-closed.json")))
+    )
+      continue;
+    try {
+      const work =
+        record.bundle &&
+        (await readJSON(
+          path.join(
+            client.scope,
+            record.role === "oracle" ? "projects" : "work",
+            record.bundle + ".json",
+          ),
+        ));
+      if (work?.status !== "completed") continue;
+      const lead = record.role === "oracle" ? record : work.lead;
+      if (!lead) continue;
+      const leadState = await executionState(lead);
+      if (leadState.pending || leadState.report?.brief?.outcome !== "completed")
+        continue;
+      if (
+        (await readJSON(path.join(record.dir, "keep.json")))?.keep ||
+        (await readJSON(path.join(record.dir, "detached.json")))
+      )
+        continue;
+      const state = await executionState(record);
+      if (state.pending || !state.ready || state.phase === "interrupted")
+        continue;
+      if (liveness(state.ready.instance) === "alive") {
+        const live = (await client.call(["agent", "get", record.id])).result
+          ?.agent;
+        if (
+          live?.pane_id !== record.pane ||
+          !["idle", "done"].includes(live.status ?? live.agent_status)
+        )
+          continue;
+        await writeJSON(path.join(record.dir, "retired.json"), {
+          reason: "task-approved",
+          at: new Date().toISOString(),
+        });
+        continue;
+      }
+      if (
+        liveness(state.ready.instance) !== "dead" ||
+        !state.ready.cleanExit ||
+        !(await shellAvailable(client, record))
+      )
+        continue;
+      await client.call(["pane", "close", record.pane]);
+      await writeJSON(path.join(record.dir, "view-closed.json"), {
+        pane: record.pane,
+        at: new Date().toISOString(),
+      });
+    } catch {
+      /* Unknown topology/process state is retained; never force close. */
+    }
+  }
+  const views = await fs
+    .readdir(path.join(client.scope, "views"))
+    .catch(() => []);
+  const panes = (
+    await client.call([
+      "pane",
+      "list",
+      "--workspace",
+      client.env.HERDR_WORKSPACE_ID,
+    ])
+  ).result?.panes;
+  if (!Array.isArray(panes)) return;
+  for (const name of views) {
+    const file = path.join(client.scope, "views", name),
+      view = await readJSON(file);
+    if (view && !panes.some((p) => p.tab_id === view.tab))
+      await writeJSON(file, { ...view, closed: true });
+  }
+}
+export async function ensureBoard(client, reopen = false) {
+  if (client.delegation) return;
+  const file = path.join(client.scope, "board.json"),
+    old = await readJSON(file);
+  if (old && !reopen) return;
+  let pane, identity;
+  if (old && reopen) {
+    const panes = (
+      await client.call([
+        "pane",
+        "list",
+        "--workspace",
+        client.env.HERDR_WORKSPACE_ID,
+      ])
+    ).result?.panes;
+    if (!Array.isArray(panes)) throw Error("Cannot confirm board topology.");
+    const existing = panes.find((p) => p.pane_id === old.pane);
+    if (existing) {
+      if (!(await shellAvailable(client, old)))
+        return {
+          status: "retained",
+          message: "Board or another process is still running in its pane.",
+        };
+      pane = old.pane;
+      identity = { tab: old.tab, terminal: old.terminal };
+    } else if (!old.pane)
+      throw Error(
+        "Board creation was uncertain. Inspect the layout before replacing it.",
+      );
+  }
+  if (!pane) {
+    await writeJSON(file, { status: "creating", owner: client.identity.token });
+    const result = await client.call([
+      "pane",
+      "split",
+      "--pane",
+      client.env.HERDR_PANE_ID,
+      "--direction",
+      "right",
+      "--ratio",
+      "0.7",
+      "--cwd",
+      client.root,
+      "--no-focus",
+    ]);
+    pane = result.result?.pane?.pane_id;
+    if (!pane)
+      throw Error("Board creation uncertain; inspect the retained layout.");
+    const current = (await client.call(["pane", "get", pane])).result?.pane;
+    identity = { tab: current?.tab_id, terminal: current?.terminal_id };
+  }
+  await writeJSON(file, {
+    status: "starting",
+    pane,
+    ...identity,
+    owner: client.identity.token,
+  });
+  const script = fileURLToPath(new URL("./board.mjs", import.meta.url));
+  await client.call(
+    [
+      "pane",
+      "run",
+      pane,
+      `${quote(process.execPath)} ${quote(script)} ${quote(client.scope)}`,
+    ],
+    undefined,
+    true,
+  );
+  await writeJSON(file, {
+    status: "open",
+    pane,
+    ...identity,
+    owner: client.identity.token,
+  });
+  return { status: "open", pane };
+}

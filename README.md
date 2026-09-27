@@ -209,3 +209,79 @@ The generator refuses an existing project directory. It creates a metadata jj re
 [pi-herdr-subagents](https://github.com/0xRichardH/pi-herdr-subagents/tree/7180d986a712e7627986a147ca8e5d5a4e0265da) was reviewed for lifecycle separation and asynchronous delivery ideas. This implementation is independent and does not install that package, include its agent bundles, or route to other harnesses.
 
 `scripts/test-live.mjs` and `scripts/test-lifecycle-live.mjs` are historical v0.3/v0.4 harnesses, retained as references. Do not execute them against the current role contracts or ongoing work. The current entry point is `scripts/test-hierarchy-live.mjs`. Destructive lifecycle scenarios require a dedicated disposable fixture and test process identities; never target a user's working family.
+
+## v0.7: bounded context and task views
+
+The default layout is `tasks`: one tab per task, with the Lead and the workers it
+actually needs (maximum four visible panes per task tab). The main tab receives
+one right-hand board. Set `board: false` to disable it; `layout: "split"` and
+`layout: "tabs"` retain the older layouts. Explicit legacy configuration is not
+silently rewritten. A capacity error preserves all panes; finish or explicitly
+close idle work before requesting more concurrent roles.
+
+The board reads durable state directly, without model calls. Arrow keys select;
+Enter focuses a live agent; `d` shows its report and evidence/session paths; `k`
+toggles keeping its pane; `a` toggles completed history; `r` accepts a follow-up
+request for the Orchestrator; `q` exits the board. `/repo-agents board` opens a
+missing board. A follow-up is a user request, not automatic approval or adoption
+of an old parent's agents.
+
+After approved task completion and its Lead's settled report, idle owned agents
+exit and their shell panes close. Reports, verification artifacts and sessions
+remain. Unknown processes, active jobs, detached agents, user-kept panes and
+shells with background children are retained. Cleanup closes individual verified
+panes, never a tab containing unrelated terminals. Direct child input marks its
+pane kept. Same-scope `repo_agent_start` reuses an idle live agent; a cleanly exited
+same-role pane can be reused after checking its identity. `/new`/reset refreshes a
+conversation without adding another pane.
+
+### Contracts and progress
+
+On `repo_project create`, explicitly declare `progressDocuments`, e.g.
+`["todo-tracker.md"]`, only for task metadata containing status. There is no
+filename-based exemption. Requirements belong in versioned project/task
+contracts; instruction files and repository files cannot be declared as progress.
+Reviewer reads of declared progress do not create code approval dependencies.
+Other observed/declared dependencies and supplied scoped AGENTS.md files do.
+External progress edits block advancement until the Orchestrator reads and
+classifies them using `repo_task_document reconcile` with a reason. Requirement
+changes must first revise the affected contract. Classification is model judgment;
+the extension enforces acknowledgment and approval gates, not semantic truth.
+
+`repo_work status` returns the invalidation reason and recovery action.
+`repo_work reopen_review` preserves requirements, baseline, execution records and
+review budget for approval-only recovery. Use `revise` for changed requirements.
+Repeated review requests with unchanged semantic requirements and artifact
+candidates are bounded independently of session/job IDs.
+
+### Evidence and context
+
+Large native Implementer tool results are replaced by bounded head/tail excerpts.
+Their captured tool result is retained under an artifact ID for `repo_artifact`
+queries. Native tools may already have truncated output: a captured result is
+not a promise that the original shell log is complete. `repo_check` runs an
+Implementer's authorized check in its assigned checkout, records exit status and
+up to 8 MiB of output, and reports truncation explicitly. Checks are never
+implicitly rerun or cached across changes to unknown external/environment inputs.
+
+Review diff pages retain their existing complete-file coverage requirements.
+Root Reviewers/Oracles must address sources with assigned task-relative paths
+(e.g. `repos/api/file.ts`); choosing `scope: "repo"` at the task root does not
+implicitly select a repository. Task Leads and Orchestrators cannot read code.
+Applicable root-to-repository AGENTS.md files are explicitly delivered to root
+roles; their aggregate input is capped at 24000 characters without silent loss.
+
+A missing report receives at most one automatic **report-only** continuation in
+the same job/review attempt. No implementation/check tools are available in that
+continuation. Insufficient evidence requires an incomplete/unknown report.
+
+`repo_checkpoint` stores a concise handoff, then applies a Pi compaction at the
+next settled boundary. It retains the same job, role, artifacts, review attempt
+and parent ownership; it does not allocate a pane or reset budgets. A Lead waiting
+for children stays waiting. This is a durable context replacement within the same
+Pi session, distinct from `/new`, which starts another conversation after a job
+settles. The handoff must preserve decisions, evidence IDs, unresolved findings
+and the next action. Context-pressure indicators start at 48k/64k input tokens or
+25%/35% of a smaller model's context window. Cumulative cache-read volume alone
+never forces a rotation. These controls reduce avoidable input; they do not
+guarantee cost reduction or that a model's summary preserves every relevant fact.

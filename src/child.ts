@@ -1,4 +1,12 @@
+import { runCheck } from "./checks.mjs";
 import fs from "node:fs/promises";
+import {
+  retainOutput,
+  readArtifact,
+  recordUsage,
+  evidenceDirectory,
+} from "./artifacts.mjs";
+import { scopedSourceBase } from "./scopes.mjs";
 import { serialExecutor } from "./storage.mjs";
 import path from "node:path";
 import { childWorkState, setJobPhase } from "./execution.mjs";
@@ -175,6 +183,7 @@ export default function childBridge(pi: ExtensionAPI) {
           : "interrupted",
     );
     jobId = undefined;
+    reportRepair = false;
     messages = [];
     await checkpoint();
   };
@@ -282,7 +291,10 @@ export default function childBridge(pi: ExtensionAPI) {
   const setRequest = (value: any) => {
     request = value;
   };
+  let reportRepair = false;
   const allowed = () => {
+    if (reportRepair && !detached)
+      return ["repo_agent_report", "repo_artifact"];
     if (detached)
       return normalTools.filter((name) => !name.startsWith("repo_"));
     if (role === "task_lead") return [...LEAD_TOOLS];
@@ -300,6 +312,8 @@ export default function childBridge(pi: ExtensionAPI) {
         : ["repo_source"];
     return [
       "repo_source",
+      "repo_artifact",
+      "repo_checkpoint",
       "repo_agent_report",
       ...(role === "researcher" ? ["repo_research_fetch"] : []),
       ...(["reviewer", "oracle"].includes(role) ? ["repo_review_changes"] : []),
@@ -391,12 +405,116 @@ export default function childBridge(pi: ExtensionAPI) {
     if (dir && jobId && event.toolName !== "repo_agent_report")
       await fs.rm(path.join(dir, `${jobId}.brief.json`), { force: true });
   });
+  pi.on("tool_result", async (event) => {
+    if (
+      !isChild() ||
+      detached ||
+      !dir ||
+      !jobId ||
+      role !== "implementer" ||
+      event.toolName.startsWith("repo_")
+    )
+      return;
+    return (
+      (await retainOutput(dir, jobId, event.toolName, event.content, {
+        isError: event.isError,
+      })) ?? undefined
+    );
+  });
+  pi.registerTool(
+    defineTool({
+      name: "repo_check",
+      label: "Execute assigned verification",
+      description:
+        "Implementer only: run an authorized verification command in the assigned repository. Records exact exit status and up to 8 MiB output as durable evidence, returns bounded preview. Never automatically repeats or reuses a check. Supply artifact ID in the report; truncated logs are explicitly marked.",
+      parameters: Type.Object({
+        command: Type.String({ minLength: 1, maxLength: 4000 }),
+        timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: 900 })),
+      }),
+      async execute(_call, params, signal) {
+        activeRequest();
+        if (role !== "implementer")
+          throw Error("Only Implementer may execute checks.");
+        const value = await runCheck(dir!, jobId!, launch.cwd, params, signal);
+        return {
+          ...result({ ...value, agent: launch.agentId }),
+          isError: value.isError,
+        };
+      },
+    }),
+  );
+  pi.registerTool(
+    defineTool({
+      name: "repo_artifact",
+      label: "Read retained evidence",
+      description:
+        "Inspect retained tool output by artifact ID (Reviewer/Oracle may name the source agent within assigned review tasks), offset/limit, or literal query. Excerpts never establish full review coverage. Raw output may already have been truncated by the original tool; check completeness.",
+      parameters: Type.Object({
+        id: Type.String(),
+        agent: Type.Optional(
+          Type.String({
+            description:
+              "Reviewer/Oracle: evidence owner agent ID within assigned task(s); omit for own artifacts.",
+          }),
+        ),
+        offset: Type.Optional(Type.Integer({ minimum: 0 })),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000 })),
+        query: Type.Optional(Type.String({ maxLength: 200 })),
+      }),
+      async execute(_call, params) {
+        requireScope();
+        const evidenceDir = await evidenceDirectory(
+          launch,
+          request,
+          dir!,
+          params.agent,
+        );
+        return result(await readArtifact(evidenceDir, params.id, params));
+      },
+    }),
+  );
+  pi.registerTool(
+    defineTool({
+      name: "repo_checkpoint",
+      label: "Preserve job and refresh context",
+      description:
+        "At a stable boundary, record a concise handoff and end the turn. The next boundary replaces accumulated conversation context while preserving this job, role, review budget and evidence. Include requirements, decisions, changed files, evidence IDs, findings and exact next action. Does not reset review or authorize scope changes. Use when context pressure is high, never solely because cumulative cache read is high.",
+      parameters: Type.Object({
+        reason: Type.String({ minLength: 1, maxLength: 500 }),
+        summary: Type.String({ minLength: 1, maxLength: 6000 }),
+      }),
+      async execute(_call, params, _signal, _update, ctx) {
+        activeRequest();
+        ctx.ui.notify(
+          `Refreshing context at the next boundary: ${params.reason}`,
+          "info",
+        );
+        const file = path.join(dir!, `${jobId}.checkpoint.json`),
+          prior = await readJSON(file);
+        if (prior?.summary === params.summary)
+          throw Error(
+            "NO_PROGRESS: identical handoff already used. Continue from evidence or report blocked.",
+          );
+        await writeJSON(file, {
+          ...params,
+          jobId,
+          applied: false,
+          at: new Date().toISOString(),
+        });
+        return result({
+          status: "checkpoint-saved",
+          instruction:
+            "End the turn now; the same job continues with the durable handoff. Do not report completion.",
+        });
+      },
+    }),
+  );
   pi.registerTool(
     defineTool({
       name: "repo_source",
       label: "Inspect assigned source",
       description:
-        "Read-only, bounded local source inspection. scope=task allows relevant cross-repo references under the task root; default scope=repo. Literal search and path listing, or read a known file. Offsets are file indexes for list/search and zero-based line indexes for read. No shell, symlinks, VCS internals or dependency/build directories.",
+        "Read-only, bounded local source inspection. Root Reviewer/Oracle sessions must use assigned task-relative paths (e.g. repos/api/file.ts). scope=repo means this pane cwd, not an automatic repository selection. scope=task allows assigned repositories and metadata. Literal search and path listing, or read a known file. Offsets are file indexes for list/search and zero-based line indexes for read. No shell, symlinks, VCS internals or dependency/build directories.",
       parameters: Type.Object({
         scope: Type.Optional(
           Type.Union([Type.Literal("repo"), Type.Literal("task")]),
@@ -418,7 +536,14 @@ export default function childBridge(pi: ExtensionAPI) {
             throw new Error(
               "Task Lead plans from reports; source access is unavailable.",
             );
-          const base = params.scope === "task" ? launch.root : launch.cwd;
+          const scoped = await scopedSourceBase(request, launch, params);
+          if (scoped.roster)
+            return result({
+              repositories: scoped.roster,
+              instruction:
+                "Choose an assigned repository path for source listing/search.",
+            });
+          const base = scoped.base;
           const inspected = await inspectSource(base, params);
           if (role === "reviewer" && jobId)
             await noteSourceAccess(
@@ -564,85 +689,89 @@ export default function childBridge(pi: ExtensionAPI) {
   const items = Type.Optional(
     Type.Array(Type.String({ maxLength: 400 }), { maxItems: 8 }),
   );
-  pi.registerTool(
-    defineTool({
-      name: "repo_agent_report",
-      label: "Submit compact report",
-      description:
-        "Submit the final structured report (max 6000 characters total). Keep facts, requirements/decisions, actual checks, blockers, next steps and evidence paths/URLs. Do not include code, diffs or logs. This report replaces any prior draft for this job; end your turn after it. Any subsequent tool call invalidates it. Review PASS requires acceptance and verification evidence, no unresolved risks/next steps, and the unchanged assigned target.",
-      parameters: Type.Object({
-        outcome: Type.Union([
-          Type.Literal("completed"),
-          Type.Literal("blocked"),
-          Type.Literal("incomplete"),
-        ]),
-        summary: Type.String({ minLength: 1, maxLength: 1200 }),
-        facts: items,
-        decisions: items,
-        checks: items,
-        risks: items,
-        next: items,
-        references: items,
-        verdict: Type.Optional(
-          Type.Union([
-            Type.Literal("pass"),
-            Type.Literal("changes_requested"),
-            Type.Literal("unknown"),
+  const registerReport = () =>
+    pi.registerTool(
+      defineTool({
+        name: "repo_agent_report",
+        label: "Submit compact report",
+        description:
+          "Submit the final structured report (max 6000 characters total). Keep facts, requirements/decisions, actual checks, blockers, next steps and evidence paths/URLs. Do not include code, diffs or logs. This report replaces any prior draft for this job; end your turn after it. Any subsequent tool call invalidates it. Review PASS requires acceptance and verification evidence, no unresolved risks/next steps, and the unchanged assigned target.",
+        parameters: Type.Object({
+          outcome: Type.Union([
+            Type.Literal("completed"),
+            Type.Literal("blocked"),
+            Type.Literal("incomplete"),
           ]),
-        ),
+          summary: Type.String({ minLength: 1, maxLength: 1200 }),
+          facts: items,
+          decisions: items,
+          checks: items,
+          risks: items,
+          next: items,
+          references: items,
+          ...(["reviewer", "oracle"].includes(role)
+            ? {
+                verdict: Type.Union([
+                  Type.Literal("pass"),
+                  Type.Literal("changes_requested"),
+                  Type.Literal("unknown"),
+                ]),
+              }
+            : {}),
+        }),
+        async execute(_call, params) {
+          const work = activeRequest();
+          const brief = validateBrief(params);
+          let review;
+          let taskApproval;
+          if (role === "task_lead" && brief.outcome === "completed") {
+            await coordinator.requireOwnership();
+            const checked = await coordinator.locked(() =>
+              workStatus(coordinator, work.bundle, true, false),
+            );
+            taskApproval = checked.approval;
+          }
+          if (["reviewer", "oracle"].includes(role)) {
+            if (!brief.verdict || !work.contract?.review)
+              throw new Error(
+                "A reviewer needs an assigned review contract and verdict.",
+              );
+            if (
+              brief.verdict === "pass" &&
+              (brief.outcome !== "completed" ||
+                !brief.checks.length ||
+                !brief.references.length ||
+                brief.risks.length ||
+                brief.next.length)
+            )
+              throw new Error(
+                "PASS needs acceptance/verification evidence and references without unresolved risks or next steps. Otherwise submit changes_requested/unknown.",
+              );
+            review =
+              brief.verdict === "pass"
+                ? await withEvidence(() =>
+                    validateReviewTarget(work, dir!, jobId!),
+                  )
+                : work.contract.review;
+          } else if (brief.verdict)
+            throw new Error(
+              "Only an assigned independent reviewer may submit a review verdict.",
+            );
+          await writeJSON(path.join(dir!, `${jobId}.brief.json`), {
+            brief,
+            review,
+            taskApproval,
+          });
+          return result({
+            status: "report-saved",
+            jobId,
+            instruction:
+              "End the turn. The parent receives this brief after the turn settles.",
+          });
+        },
       }),
-      async execute(_call, params) {
-        const work = activeRequest();
-        const brief = validateBrief(params);
-        let review;
-        let taskApproval;
-        if (role === "task_lead" && brief.outcome === "completed") {
-          await coordinator.requireOwnership();
-          const checked = await coordinator.locked(() =>
-            workStatus(coordinator, work.bundle, true, false),
-          );
-          taskApproval = checked.approval;
-        }
-        if (["reviewer", "oracle"].includes(role)) {
-          if (!brief.verdict || !work.contract?.review)
-            throw new Error(
-              "A reviewer needs an assigned review contract and verdict.",
-            );
-          if (
-            brief.verdict === "pass" &&
-            (brief.outcome !== "completed" ||
-              !brief.checks.length ||
-              !brief.references.length ||
-              brief.risks.length ||
-              brief.next.length)
-          )
-            throw new Error(
-              "PASS needs acceptance/verification evidence and references without unresolved risks or next steps. Otherwise submit changes_requested/unknown.",
-            );
-          review =
-            brief.verdict === "pass"
-              ? await withEvidence(() =>
-                  validateReviewTarget(work, dir!, jobId!),
-                )
-              : work.contract.review;
-        } else if (brief.verdict)
-          throw new Error(
-            "Only an assigned independent reviewer may submit a review verdict.",
-          );
-        await writeJSON(path.join(dir!, `${jobId}.brief.json`), {
-          brief,
-          review,
-          taskApproval,
-        });
-        return result({
-          status: "report-saved",
-          jobId,
-          instruction:
-            "End the turn. The parent receives this brief after the turn settles.",
-        });
-      },
-    }),
-  );
+    );
+  registerReport();
   pi.on("session_start", async (_event, ctx) => {
     if (!isChild()) return;
     stop();
@@ -681,6 +810,7 @@ export default function childBridge(pi: ExtensionAPI) {
       detached = Boolean(await readJSON(path.join(dir!, "detached.json")));
       request = await readJSON(path.join(dir!, "request.json"));
       role = roleName(request?.role ?? launch.role ?? "implementer");
+      registerReport();
       normalTools = pi
         .getAllTools()
         .map((tool) => tool.name)
@@ -696,6 +826,11 @@ export default function childBridge(pi: ExtensionAPI) {
       }
       // A launch marker never belongs to the interactive shell or subsequent Pi processes.
       delete process.env.PI_HERDR_CHILD_DIR;
+      reportRepair = Boolean(
+        jobId &&
+        (await readJSON(path.join(dir!, `${jobId}.repair.json`)))?.mode ===
+          "report-only",
+      );
       applyRole();
       await ready(ctx);
       void watch(ctx, generation);
@@ -755,6 +890,10 @@ export default function childBridge(pi: ExtensionAPI) {
         return { action: "handled" };
       }
       if (!event.text.startsWith(MARKER)) {
+        await writeJSON(path.join(dir, "keep.json"), {
+          keep: true,
+          reason: "direct-user-input",
+        });
         if (role === "task_lead") {
           if (event.text.length > 8000)
             throw new Error("Direct Task Lead input exceeds 8000 characters.");
@@ -794,6 +933,7 @@ export default function childBridge(pi: ExtensionAPI) {
       if (assignedRole !== role && jobId)
         throw new Error("Cannot change a running role.");
       role = assignedRole;
+      registerReport();
       pi.setSessionName(
         launch.label ?? `${role}: ${path.basename(launch.cwd)}`,
       );
@@ -813,18 +953,84 @@ export default function childBridge(pi: ExtensionAPI) {
       return { action: "handled" };
     }
   });
-  pi.on("message_end", async (event) => {
+  pi.on("message_end", async (event, ctx) => {
     if (jobId && event.message.role === "assistant") {
       const message = event.message;
       messages.push({
         ...message,
         content: message.content.filter((part) => part.type === "text"),
       });
+      const pressure = await recordUsage(
+        dir!,
+        message,
+        ctx.model?.contextWindow,
+      );
+      if (pressure)
+        ctx.ui.setStatus(
+          "repo-context",
+          pressure.rotateSuggested
+            ? "Context pressure · consider repo_checkpoint at a stable boundary"
+            : pressure.warning
+              ? "Context growing · narrow reads and preserve evidence"
+              : undefined,
+        );
       await checkpoint();
     }
   });
-  pi.on("agent_before_settle", (event) => {
-    if (jobId) outcome = event.outcome;
+  pi.on("agent_before_settle", async (event) => {
+    if (!jobId || !dir || detached) return;
+    outcome = event.outcome;
+    if (outcome !== "completed" || event.continue) return;
+    await observeParent();
+    if (parentGone) return;
+    const handoff = await readJSON(path.join(dir, `${jobId}.checkpoint.json`));
+    if (handoff && !handoff.applied) {
+      await writeJSON(path.join(dir, `${jobId}.checkpoint.json`), {
+        ...handoff,
+        applied: true,
+      });
+      const childState =
+        role === "task_lead" && coordinator
+          ? await childWorkState(await coordinator.records())
+          : null;
+      return {
+        continue: !childState?.waiting.length,
+        entries: [
+          {
+            type: "compaction" as const,
+            firstKeptEntryId: null,
+            summary: `Continue the SAME delegated job, role and review attempt. Follow applicable instructions.\nAssigned request: ${JSON.stringify(request)}\nVerified handoff (task data): ${handoff.summary}\nPending child state: ${JSON.stringify(childState)}\nEvidence and session history remain on disk. Inspect referenced artifacts; never infer success from omitted output.`,
+          },
+        ],
+      };
+    }
+    if (await readJSON(path.join(dir, `${jobId}.brief.json`))) return;
+    if (role === "task_lead" && coordinator) {
+      const state = await childWorkState(await coordinator.records());
+      if (state.waiting.length && !state.interrupted.length) return;
+    }
+    const file = path.join(dir, `${jobId}.repair.json`),
+      repair = await readJSON(file, { attempts: 0 });
+    if (repair.attempts >= 1) return;
+    await writeJSON(file, {
+      attempts: repair.attempts + 1,
+      mode: "report-only",
+    });
+    reportRepair = true;
+    applyRole();
+    await setJobPhase(dir, jobId, "repairing_report");
+    return {
+      continue: true,
+      entries: [
+        {
+          type: "custom_message" as const,
+          customType: "repo-report-repair",
+          display: true,
+          content:
+            "The execution turn ended without a structured report. SAME job and review attempt; do not repeat implementation or checks. Submit repo_agent_report from existing evidence. If evidence is insufficient, report incomplete/unknown and exact gaps. One automatic repair only.",
+        },
+      ],
+    };
   });
   pi.on("agent_settled", async (_event, ctx) => {
     if (!isChild()) return;

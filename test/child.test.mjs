@@ -281,3 +281,65 @@ test("read-only child roles reject raw source, shell and edit tools", async (t) 
       assert.equal((await f.emit("tool_call", { toolName })).block, true);
   }
 });
+
+test("missing brief gets exactly one report-only continuation without changing job", async (t) => {
+  const { dir, emit, registered } = await child(t);
+  await emit("input", { text: `${MARKER}job-1\nWork` });
+  const event = {
+    outcome: "completed",
+    context: { canContinue: false },
+    continue: false,
+  };
+  const repair = await emit("agent_before_settle", event);
+  assert.equal(repair.continue, true);
+  assert.match(repair.entries[0].content, /SAME job/);
+  assert.equal((await emit("tool_call", { toolName: "read" })).block, true);
+  assert.equal(await readJSON(path.join(dir, "job-1.result.json")), null);
+  assert.equal(await emit("agent_before_settle", event), undefined);
+  await registered
+    .get("repo_agent_report")
+    .execute("", { outcome: "incomplete", summary: "Evidence missing" });
+  await emit("agent_settled");
+  assert.equal(
+    (await readJSON(path.join(dir, "job-1.result.json"))).brief.outcome,
+    "incomplete",
+  );
+});
+test("checkpoint replaces context at a boundary but retains delegated job", async (t) => {
+  const { dir, emit, registered, ctx } = await child(t);
+  await emit("input", { text: `${MARKER}job-1\nWork` });
+  await registered.get("repo_checkpoint").execute(
+    "",
+    {
+      reason: "large context",
+      summary: "Requirement: implement timeout; read artifact X then verify Y.",
+    },
+    undefined,
+    undefined,
+    ctx,
+  );
+  const result = await emit("agent_before_settle", {
+    outcome: "completed",
+    context: { canContinue: false },
+  });
+  assert.equal(result.entries[0].type, "compaction");
+  assert.equal(result.entries[0].firstKeptEntryId, null);
+  assert.match(result.entries[0].summary, /job-1/);
+  assert.equal(await readJSON(path.join(dir, "job-1.result.json")), null);
+  assert.equal(
+    (await readJSON(path.join(dir, "job-1.checkpoint.json"))).applied,
+    true,
+  );
+});
+
+test("report schema exposes verdict only to independent review roles", async (t) => {
+  for (const role of ["implementer", "task_lead", "reviewer", "oracle"]) {
+    const { emit, registered } = await child(t, { role });
+    await emit("input", { text: `${MARKER}job-1\nWork` });
+    const schema = registered.get("repo_agent_report").parameters;
+    assert.equal(
+      Object.hasOwn(schema.properties, "verdict"),
+      ["reviewer", "oracle"].includes(role),
+    );
+  }
+});

@@ -32,11 +32,14 @@ if (!start) {
     "Hierarchy verification",
     "--cwd",
     root,
+    ...(process.env.PI_CODING_AGENT_DIR
+      ? ["--env", `PI_CODING_AGENT_DIR=${process.env.PI_CODING_AGENT_DIR}`]
+      : []),
     "--no-focus",
   ]);
   const pane = created.result.root_pane.pane_id,
     name = "hierarchy-" + Date.now().toString(36);
-  const launched = await herdr([
+  let launched = await herdr([
     "agent",
     "start",
     name,
@@ -48,6 +51,15 @@ if (!start) {
     "--session-dir",
     path.join(evidence, "main-sessions"),
   ]);
+  const bindingDeadline = Date.now() + 10000;
+  while (!launched.result.agent.agent_session?.value) {
+    if (Date.now() > bindingDeadline)
+      throw Error(
+        "Herdr session identity unavailable; inspect retained main, do not resubmit.",
+      );
+    await new Promise((r) => setTimeout(r, 250));
+    launched = await herdr(["agent", "get", name]);
+  }
   start = {
     root,
     pane,
@@ -55,7 +67,7 @@ if (!start) {
     session: launched.result.agent.agent_session.value,
   };
   await writeJSON(path.join(evidence, "hierarchy-start.json"), start);
-  const prompt = `Authorized isolated hierarchy integration test. Create one project covering two sequential tasks: A implements the shared timeout contract in repos/backend and repos/frontend, including zero ms, npm test/build for both and the cross-module retryLabel(timeoutResponse(1250)) === 'Retry in 1250 ms'. B runs only after A's approved completion, adds new repos/backend/health.mjs exporting health() returning 'ok', verifies it with Node and changes no existing files. Create tasks with repo_work, delegate each to its own Task Lead, who delegates Implementers and uses repo_request_review for independent Reviewer approval. Keep roles separate. After B, check A's reviewValid remains true without another A review. Request Oracle for all task approvals, then complete the project. Preserve package.json, AGENTS.md and references/timeout-contract.md. Update the tracker. Do not read/edit code yourself or poll; end turns for automatic reports. Stop on genuine blockers. Finish with HIERARCHY-LIVE-COMPLETE.`;
+  const prompt = `Authorized isolated hierarchy integration test. Create one project covering two sequential tasks: A implements the shared timeout contract in repos/backend and repos/frontend, including zero ms, npm test/build for both and the cross-module retryLabel(timeoutResponse(1250)) === 'Retry in 1250 ms'. B runs only after A's approved completion, adds new repos/backend/health.mjs exporting health() returning 'ok', verifies it with Node and changes no existing files. Create tasks with repo_work, delegate each to its own Task Lead, who delegates Implementers and uses repo_request_review for independent Reviewer approval. Keep roles separate. After B, check A's reviewValid remains true without another A review. Request Oracle for all task approvals, then complete the project. Preserve package.json, AGENTS.md and references/timeout-contract.md. When creating repo_project, explicitly set progressDocuments=["todo-tracker.md"]. Update this progress-only tracker after each approved task; both approvals must remain valid. Readonly root roles must follow supplied descendant instructions. Use default task tabs and automatic board. Update the tracker. Do not read/edit code yourself or poll; end turns for automatic reports. Stop on genuine blockers. Finish with HIERARCHY-LIVE-COMPLETE.`;
   // Persist intent before submission: a timeout must not cause automatic resubmission.
   await writeJSON(path.join(evidence, "hierarchy-prompt-intent.json"), {
     name,

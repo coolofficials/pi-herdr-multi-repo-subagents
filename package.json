@@ -1,6 +1,6 @@
 {
   "name": "pi-herdr-multi-repo-subagents",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Delegate repository work to visible Pi sessions in Herdr panes.",
   "type": "module",
   "license": "MIT",

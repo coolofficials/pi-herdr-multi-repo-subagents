@@ -4,9 +4,17 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import fs from "node:fs/promises";
+import { ensureBoard, maintainViews } from "./views.mjs";
+import { readJSON } from "./storage.mjs";
 import path from "node:path";
 import { Controller, writeJSON, loadConfig } from "./core.mjs";
 import { MAIN_TOOLS, CHILD_TOOLS } from "./contracts.mjs";
+import {
+  acknowledgeProgress,
+  requireProgress,
+  recordProgressWrite,
+} from "./documents.mjs";
 import { taskDocument } from "./access.mjs";
 import {
   createWork,
@@ -14,6 +22,7 @@ import {
   workStatus,
   getWork,
   reviseWork,
+  reopenReview,
   projectAction,
   taskNote,
   extendReview,
@@ -95,6 +104,37 @@ export default function extension(pi: ExtensionAPI) {
       const client = controller(ctx);
       if (child.state().parentGone) return;
       client.lifecycle?.assertOwned();
+      if (!client.delegation) {
+        if ((await loadConfig(client.root)).layout !== "split")
+          await client.locked(() => maintainViews(client));
+        const requests = (
+          await fs
+            .readdir(path.join(client.scope, "board-requests"))
+            .catch(() => [])
+        ).filter((name) => name.endsWith(".json"));
+        if (!ctx.hasPendingMessages())
+          for (const name of requests.slice(0, 1)) {
+            const file = path.join(client.scope, "board-requests", name),
+              request = await readJSON(file);
+            if (
+              request?.owner === client.identity.token &&
+              request.action === "resume" &&
+              typeof request.text === "string" &&
+              request.text.length <= 2000
+            ) {
+              await getWork(client.workScope, request.bundle);
+              pi.sendMessage(
+                {
+                  customType: "repo-board-request",
+                  display: true,
+                  content: `User follow-up from task board for task ${request.bundle}:\n${request.text}\nAssess current contracts/evidence, then reopen the task if needed. Do not treat prior completion as approval of new work.`,
+                },
+                { triggerTurn: true, deliverAs: "followUp" },
+              );
+            }
+            await fs.rename(file, file + ".handled");
+          }
+      }
       const pending = (await client.records()).filter(
         (r: any) => r.owner === client.owner && r.jobId,
       );
@@ -171,7 +211,7 @@ export default function extension(pi: ExtensionAPI) {
     ctx.ui.setStatus(
       "repo-discovery",
       snapshot.repositories.length
-        ? `Orchestrator · ${snapshot.repositories.length} repos`
+        ? `${child.isChild() ? "Task Lead" : "Orchestrator"} · ${snapshot.repositories.length} repos`
         : undefined,
     );
     return repositoryContext(snapshot);
@@ -215,6 +255,21 @@ export default function extension(pi: ExtensionAPI) {
     ) {
       try {
         await refreshDiscovery(ctx);
+        if (
+          ctx.hasUI &&
+          managed &&
+          controller(ctx).lifecycle?.lease &&
+          (await loadConfig(ctx.cwd)).board !== false
+        ) {
+          try {
+            await ensureBoard(controller(ctx));
+          } catch (error) {
+            ctx.ui.setStatus(
+              "repo-board",
+              `Board unavailable: ${String(error)}`,
+            );
+          }
+        }
       } catch (error) {
         managed = true;
         restrictMain();
@@ -435,6 +490,18 @@ export default function extension(pi: ExtensionAPI) {
   );
   pi.registerTool(
     defineTool({
+      name: "repo_agent_release",
+      label: "Release idle worker",
+      description:
+        "End a direct child's idle Pi process after its accepted job settled, preserving reports and sessions. Frees a reusable layout slot after confirmed clean exit. User-kept, busy, detached or unknown processes are protected. Never releases an unfinished job.",
+      parameters: Type.Object({ id }),
+      async execute(_call, params, signal, _update, ctx) {
+        return result(await controller(ctx).releaseAgent(params, signal));
+      },
+    }),
+  );
+  pi.registerTool(
+    defineTool({
       name: "repo_agent_forget",
       label: "Forget exited repository agent",
       description:
@@ -462,15 +529,17 @@ export default function extension(pi: ExtensionAPI) {
       name: "repo_task_document",
       label: "Task documents",
       description:
-        "List/read/write exact task metadata documents allowed in pi-herdr.json documents (default AGENTS.md and todo-tracker.md). Never reads repository sources, raw logs or child transcripts. Read offsets are zero-based lines. Writes replace one document, max 16000 characters.",
+        "List/read/write exact task metadata documents allowed in pi-herdr.json documents (default AGENTS.md and todo-tracker.md). Never reads repository sources, raw logs or child transcripts. Read offsets are zero-based lines. Writes replace one document, max 16000 characters. reconcile acknowledges a declared progress document external edit after reading it and classifying progress-only changes or explicitly revising affected requirements first; explain in reason. Pending external edits block completion and overwrite.",
       parameters: Type.Object({
         action: Type.Union([
           Type.Literal("list"),
           Type.Literal("read"),
           Type.Literal("write"),
+          Type.Literal("reconcile"),
         ]),
         file: Type.Optional(Type.String()),
         text: Type.Optional(Type.String({ maxLength: 16000 })),
+        reason: Type.Optional(Type.String({ maxLength: 1200 })),
         offset: Type.Optional(Type.Integer({ minimum: 0 })),
       }),
       async execute(_call, params, _signal, _update, ctx) {
@@ -481,11 +550,29 @@ export default function extension(pi: ExtensionAPI) {
         const client = controller(ctx);
         await client.requireOwnership();
         return result(
-          await taskDocument(
-            client.root,
-            await loadConfig(client.root),
-            params,
-          ),
+          await client.locked(async () => {
+            if (params.action === "reconcile")
+              return acknowledgeProgress(
+                client.root,
+                client.workScope,
+                params.file,
+                params.reason,
+              );
+            if (params.action === "write")
+              await requireProgress(client.root, client.workScope);
+            const value = await taskDocument(
+              client.root,
+              await loadConfig(client.root),
+              params,
+            );
+            if (params.action === "write")
+              await recordProgressWrite(
+                client.root,
+                client.workScope,
+                params.file,
+              );
+            return value;
+          }),
         );
       },
     }),
@@ -495,13 +582,14 @@ export default function extension(pi: ExtensionAPI) {
       name: "repo_work",
       label: "Reviewable work bundle",
       description:
-        "Orchestrator creates a task within a project before implementation, or revises/reopens its requirements. Task Lead reads its own status. Use repo_request_review to declare readiness; repo_agent_report outcome=completed checks Reviewer PASS and commits task completion. Completed tasks sharing changed files may need renewed approval. Do not request review after every small edit; batch a coherent completion candidate.",
+        "Orchestrator creates a task within a project before implementation, or revises its requirements. reopen_review preserves execution evidence and requirements for approval-only recovery; revise is for changed work. Task Lead reads its own status. Use repo_request_review to declare readiness; repo_agent_report outcome=completed checks Reviewer PASS and commits task completion. Completed tasks sharing changed files may need renewed approval. Do not request review after every small edit; batch a coherent completion candidate.",
       parameters: Type.Object({
         action: Type.Union([
           Type.Literal("create"),
           Type.Literal("list"),
           Type.Literal("status"),
           Type.Literal("revise"),
+          Type.Literal("reopen_review"),
         ]),
         id: Type.Optional(Type.String()),
         project: Type.Optional(Type.String()),
@@ -517,6 +605,8 @@ export default function extension(pi: ExtensionAPI) {
         return result(
           await client.locked(async () => {
             if (params.action === "create") return createWork(client, params);
+            if (params.action === "reopen_review")
+              return reopenReview(client, params.id);
             if (params.action === "revise")
               return reviseWork(client, params.id, params.requirements);
             if (params.action === "list") {
@@ -542,9 +632,12 @@ export default function extension(pi: ExtensionAPI) {
       description:
         "Manager declares readiness in one action. Task Lead: checks completed Implementer reports and input decisions, then starts/reuses Reviewer. Orchestrator: checks approved Lead reports, then starts/reuses Oracle. Returns an existing pending review or valid approval without duplicate dispatch. Does not decide readiness for the manager. Delivery uncertainty requires inspection, not blind retry.",
       parameters: Type.Object({
-        id: Type.String({
-          description: "Task ID for Task Lead; project ID for Orchestrator.",
-        }),
+        id: Type.Optional(
+          Type.String({
+            description:
+              "Omit for Task Lead's own task; Orchestrator must supply project ID.",
+          }),
+        ),
         reason: Type.String({ minLength: 1, maxLength: 1200 }),
       }),
       async execute(_call, params, signal, _update, ctx) {
@@ -552,6 +645,7 @@ export default function extension(pi: ExtensionAPI) {
           await controller(ctx).requestReview(
             {
               ...params,
+              id: params.id ?? controller(ctx).delegation?.bundle,
               model: ctx.model
                 ? `${ctx.model.provider}/${ctx.model.id}`
                 : undefined,
@@ -568,7 +662,7 @@ export default function extension(pi: ExtensionAPI) {
       name: "repo_project",
       label: "Overall work",
       description:
-        "Orchestrator-only overall requirements and completion gate. Create before tasks. Use repo_request_review with project ID after all Task Leads report approved completion; it validates readiness and dispatches Oracle. Complete requires a current Oracle PASS. Revise reopens overall requirements, invalidates its approval and preserves review budget. Status/list are compact; no source/diff.",
+        "Orchestrator-only overall requirements and completion gate. Create before tasks; explicitly declare progressDocuments (exact metadata paths containing status only). Requirements belong in versioned project/task contracts; AGENTS.md is never progress-only. Use repo_request_review with project ID after all Task Leads report approved completion; it validates readiness and dispatches Oracle. Complete requires a current Oracle PASS. Revise reopens overall requirements, invalidates its approval and preserves review budget. Status/list are compact; no source/diff.",
       parameters: Type.Object({
         action: Type.Union([
           Type.Literal("create"),
@@ -580,6 +674,9 @@ export default function extension(pi: ExtensionAPI) {
         id: Type.Optional(Type.String()),
         title: Type.Optional(Type.String({ maxLength: 160 })),
         requirements: Type.Optional(Type.String({ maxLength: 8000 })),
+        progressDocuments: Type.Optional(
+          Type.Array(Type.String(), { maxItems: 30 }),
+        ),
       }),
       async execute(_call, params, _signal, _update, ctx) {
         const client = controller(ctx);
@@ -659,6 +756,13 @@ export default function extension(pi: ExtensionAPI) {
             "Task Leads may use /repo-agents recover <agent-id> for their own children. Other coordination uses tools.",
             "info",
           );
+        return;
+      }
+      if (action === "board") {
+        const client = controller(ctx);
+        await client.requireOwnership();
+        const board = await ensureBoard(client, true);
+        ctx.ui.notify(board?.message ?? "Board opened.", "info");
         return;
       }
       if (action === "extend-review") {

@@ -1,3 +1,4 @@
+import { isProgress, requireProgress } from "./documents.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -9,7 +10,7 @@ const digest = (data) => createHash("sha256").update(data).digest("hex");
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const signature = (entry) =>
   entry ? { hash: entry.hash, mode: entry.mode } : null;
-async function fileState(root, file) {
+export async function fileState(root, file) {
   try {
     const target = await scopedPath(root, file),
       stat = await fs.lstat(target);
@@ -45,6 +46,8 @@ async function getScope(request, dir, job) {
     repositories: Object.create(null),
     pending: [],
   };
+  for (const instruction of request.contract.instructions ?? [])
+    scope.files[instruction.file] = instruction.signature;
   const previous = request.contract.previousReview?.scope;
   if (previous) {
     for (const [file, value] of Object.entries(previous.files)) {
@@ -80,6 +83,7 @@ export async function addReviewDependencies(
   for (const file of files) {
     const target = await scopedPath(scope.root, file, true),
       relative = path.relative(scope.root, target).split(path.sep).join("/");
+    if (await isProgress(request.contract.review.workScope, relative)) continue;
     const value = await fileState(scope.root, relative);
     if (
       Object.hasOwn(scope.files, relative) &&
@@ -181,6 +185,11 @@ export async function taskApprovalScope(request, dir, job) {
 }
 export async function approvalScopeValid(scope) {
   if (!scope?.root || !scope.project) return false;
+  try {
+    await requireProgress(scope.root, scope.project.scope);
+  } catch {
+    return false;
+  }
   const project = await readJSON(
     path.join(scope.project.scope, "projects", `${scope.project.id}.json`),
   );
@@ -191,4 +200,46 @@ export async function approvalScopeValid(scope) {
     if ((await snapshot(repo.path)).fingerprint !== repo.fingerprint)
       return false;
   return true;
+}
+
+export async function approvalScopeStatus(scope) {
+  if (!scope)
+    return {
+      valid: false,
+      reason: "missing_scope",
+      nextAction: "request_review",
+    };
+  const project = await readJSON(
+    path.join(scope.project.scope, "projects", scope.project.id + ".json"),
+  );
+  if (project?.revision !== scope.project.revision)
+    return {
+      valid: false,
+      reason: "project_contract_changed",
+      nextAction: "review_changed_scope",
+    };
+  try {
+    await requireProgress(scope.root, scope.project.scope);
+  } catch {
+    return {
+      valid: false,
+      reason: "progress_input_pending",
+      nextAction: "reconcile_progress",
+    };
+  }
+  const changed = [];
+  for (const [file, expected] of Object.entries(scope.files))
+    if (!same(await fileState(scope.root, file), expected)) changed.push(file);
+  for (const [repo, expected] of Object.entries(scope.repositories))
+    if ((await snapshot(expected.path)).fingerprint !== expected.fingerprint)
+      changed.push(repo);
+  return changed.length
+    ? {
+        valid: false,
+        reason: "dependency_changed",
+        changed,
+        nextAction: "review_changed_scope",
+        preserved: ["execution-records", "unaffected-review-coverage"],
+      }
+    : { valid: true };
 }

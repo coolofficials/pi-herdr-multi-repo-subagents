@@ -3,7 +3,7 @@ import path from "node:path";
 import { readJSON, writeJSON } from "./storage.mjs";
 import { liveness } from "./lifecycle.mjs";
 
-/** @typedef {'idle'|'running'|'waiting_children'|'needs_report'|'settled'|'interrupted'|'recovered'} JobPhase */
+/** @typedef {'idle'|'running'|'waiting_children'|'needs_report'|'repairing_report'|'settled'|'interrupted'|'recovered'} JobPhase */
 /** Read durable state once; recovery is terminal, never an implicit success.
  * @param {{dir:string}} member
  */
@@ -35,9 +35,9 @@ export async function executionState(member) {
       phase = "interrupted";
     else if (
       activity?.jobId === request.jobId &&
-      activity.status === "waiting_children"
+      ["waiting_children", "repairing_report"].includes(activity.status)
     )
-      phase = "waiting_children";
+      phase = activity.status;
     else phase = "running";
   }
   return {

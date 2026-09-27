@@ -1,9 +1,16 @@
+import { reviewProgress } from "./progress.mjs";
+import { registerProgress, requireProgress } from "./documents.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { readJSON, writeJSON } from "./storage.mjs";
 import { resolveRepo } from "./core.mjs";
-import { approvalScopeValid, taskApprovalScope } from "./approval.mjs";
+import {
+  approvalScopeValid,
+  taskApprovalScope,
+  approvalScopeStatus,
+  fileState,
+} from "./approval.mjs";
 import { executionState } from "./execution.mjs";
 import { snapshot, reviewChanges } from "./workflow.mjs";
 import { publicReport } from "./contracts.mjs";
@@ -81,7 +88,10 @@ export async function listProjects(scope) {
     tasks: p.tasks,
   }));
 }
-export async function createProject(client, { title, requirements }) {
+export async function createProject(
+  client,
+  { title, requirements, progressDocuments = /** @type {string[]} */ ([]) },
+) {
   assertRoot(client);
   validateRequirements(requirements);
   if (!title?.trim() || title.length > 160)
@@ -98,6 +108,7 @@ export async function createProject(client, { title, requirements }) {
     status: "working",
     createdAt: new Date().toISOString(),
   };
+  await registerProgress(client.root, scopeOf(client), p.id, progressDocuments);
   await save(scopeOf(client), "projects", p);
   return p;
 }
@@ -335,6 +346,27 @@ async function makeReview(client, value, record, jobId, kind, repos) {
   }
   const project =
     kind === "projects" ? value : await getProject(scope, value.project);
+  const progressEvidence = {};
+  const previousScope =
+    prior &&
+    (await readJSON(path.join(prior.dir, `${prior.jobId}.scope.json`)));
+  for (const file of Object.keys(previousScope?.files ?? {}))
+    progressEvidence[file] = await fileState(client.root, file);
+  for (const member of value.members ?? []) {
+    const checks = await fs
+      .readdir(path.join(member.dir, "checks"))
+      .catch(() => []);
+    for (const name of checks.filter((n) => n.endsWith(".result.json"))) {
+      const check = await readJSON(path.join(member.dir, "checks", name));
+      if (check)
+        progressEvidence[`check:${member.repo}:${check.command}`] = {
+          exitCode: check.exitCode,
+          hash: check.hash,
+          complete: check.complete,
+        };
+    }
+  }
+  await reviewProgress(scope, kind, value, targets, project, progressEvidence);
   const review = {
     projectBinding: { scope, id: project.id, revision: project.revision },
     workScope: scope,
@@ -511,11 +543,50 @@ async function reviewValid(value) {
   }
   return true;
 }
+export async function approvalStatus(value) {
+  if (await reviewValid(value)) return { valid: true };
+  const latest = value.reviews.at(-1);
+  if (!latest)
+    return {
+      valid: false,
+      reason: "review_missing",
+      nextAction: "request_review",
+    };
+  const report = await readJSON(
+    path.join(latest.dir, `${latest.jobId}.result.json`),
+  );
+  if (report?.status === "needs-report")
+    return {
+      valid: false,
+      reason: "report_missing",
+      nextAction: "repair_report",
+    };
+  if (
+    latest.requirementsRevision !== value.revision ||
+    latest.noteRevision !== (value.noteRevision ?? 0)
+  )
+    return {
+      valid: false,
+      reason: "contract_changed",
+      nextAction: "review_changed_scope",
+    };
+  if (report?.review?.approvalScope) {
+    const status = await approvalScopeStatus(report.review.approvalScope);
+    if (!status.valid) return status;
+  }
+  return {
+    valid: false,
+    reason: "review_not_approved",
+    nextAction: "inspect_review",
+    preserved: ["execution-records"],
+  };
+}
 export async function workStatus(client, id, complete = false, commit = true) {
   if (client.delegation) assertTaskOwner(client, id);
   const scope = scopeOf(client),
     w = await getWork(scope, id);
   if (complete) {
+    await requireProgress(client.root, scope);
     assertTaskOwner(client, id);
     requireClassifiedInputs(w);
     await idleMembers(client, w.members);
@@ -561,6 +632,7 @@ export async function workStatus(client, id, complete = false, commit = true) {
     status: w.status,
     repos: Object.keys(w.repos),
     reviewValid: await reviewValid(w),
+    approvalStatus: await approvalStatus(w),
     attempts: w.reviews.length,
     reviewLimit: w.reviewLimit,
   };
@@ -574,7 +646,12 @@ export async function taskCandidate(client, id) {
   await idleMembers(client, w.members);
   for (const repo of Object.keys(w.repos)) {
     const implementer = w.members
-      .filter((m) => !m.retired && m.repo === repo && m.role === "implementer")
+      .filter(
+        (m) =>
+          (!m.retired || w.approvalOnly) &&
+          m.repo === repo &&
+          m.role === "implementer",
+      )
       .at(-1);
     const req = implementer
       ? await readJSON(path.join(implementer.dir, "request.json"))
@@ -635,12 +712,13 @@ export async function projectAction(
     id = /** @type {string | undefined} */ (undefined),
     title = /** @type {string | undefined} */ (undefined),
     requirements = /** @type {string | undefined} */ (undefined),
+    progressDocuments = /** @type {string[]} */ ([]),
   },
 ) {
   assertRoot(client);
   const scope = scopeOf(client);
   if (action === "create")
-    return createProject(client, { title, requirements });
+    return createProject(client, { title, requirements, progressDocuments });
   if (action === "list")
     return { projects: (await listProjects(scope)).slice(-50) };
   const p = await getProject(scope, id);
@@ -652,6 +730,7 @@ export async function projectAction(
     await idleMembers(client, [{ id: latest.agentId, dir: latest.dir }]);
   }
   if (action === "candidate" || action === "complete") {
+    await requireProgress(client.root, scope);
     const tasks = await approvedTasks(client, p);
     if (action === "complete") {
       if (!(await reviewValid(p)))
@@ -727,6 +806,7 @@ export async function reviseWork(client, id, requirements) {
   w.history ??= [];
   w.history.push({ revision: w.revision, requirements: w.requirements });
   w.requirements = requirements;
+  delete w.approvalOnly;
   delete w.escalation;
   w.revision++;
   w.status = "working";
@@ -828,6 +908,7 @@ export async function inspectHierarchyReview(
 export async function validateReviewTarget(request, dir, jobId) {
   const review = request?.contract?.review;
   if (!review?.targets) throw new Error("No independent review assigned.");
+  await requireProgress(request.contract.root, review.workScope);
   const current =
     review.kind === "projects"
       ? await getProject(review.workScope, review.id)
@@ -907,6 +988,14 @@ export async function extendReview(client, kind, id) {
         ? await getProject(scope, id)
         : await getWork(scope, id);
   value.reviewLimit++;
+  await fs.rm(
+    path.join(
+      scope,
+      "progress",
+      `${kind === "oracle" ? "projects" : "work"}-${id}.json`,
+    ),
+    { force: true },
+  );
   await save(scope, kind === "oracle" ? "projects" : "work", value);
   return value.reviewLimit;
 }
@@ -1029,5 +1118,41 @@ export async function taskInput(
         : kind === "question"
           ? "Answer locally; no approval change or parent report is needed."
           : "Continue implementation through the task's Implementers.",
+  };
+}
+
+export async function reopenReview(client, id) {
+  assertRoot(client);
+  const scope = scopeOf(client),
+    w = await getWork(scope, id),
+    p = await getProject(scope, w.project);
+  await requireProgress(client.root, scope);
+  requireClassifiedInputs(w);
+  await idleMembers(client, w.members);
+  if (w.lead) await idleMembers(client, [w.lead]);
+  if (p.status === "reviewing") {
+    const r = p.reviews.at(-1);
+    await idleMembers(client, [{ id: r.agentId, dir: r.dir }]);
+  }
+  for (const other of await listWork(scope))
+    if (
+      other.id !== id &&
+      other.status !== "completed" &&
+      other.repos.some((r) => w.repos[r])
+    )
+      throw Error("Another unfinished task owns this checkout.");
+  w.approvalOnly = true;
+  w.status = "working";
+  p.status = "working";
+  await save(scope, "work", w);
+  await save(scope, "projects", p);
+  return {
+    id,
+    status: w.status,
+    revision: w.revision,
+    attempts: w.reviews.length,
+    preserved: ["execution-records", "requirements", "review-budget"],
+    nextAction:
+      "Resume Task Lead, assess changed scope and request review. Only request implementation if findings require it.",
   };
 }
