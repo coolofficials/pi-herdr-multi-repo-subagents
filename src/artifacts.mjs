@@ -7,13 +7,13 @@ export async function retainOutput(
   jobId,
   tool,
   content,
-  { isError = false, limit = 8192 } = {},
+  { isError = false, limit = 8192, always = false } = {},
 ) {
   const text = content
     .filter((c) => c.type === "text")
     .map((c) => c.text)
     .join("\n");
-  if (text.length <= limit) return null;
+  if (text.length <= limit && !always) return null;
   const id = randomUUID();
   const file = path.join(dir, "artifacts", id + ".json");
   await writeJSON(file, {
@@ -29,7 +29,10 @@ export async function retainOutput(
     createdAt: new Date().toISOString(),
   });
   const half = Math.floor((limit - 600) / 2);
-  const preview = `${text.slice(0, half)}\n\n[Output excerpt: ${text.length} characters. Use repo_artifact with id=${id}, offset/limit or query to inspect retained output. Omitted text is not proof of success.]\n\n${text.slice(-half)}`;
+  const preview =
+    text.length <= limit
+      ? `${text}\n[Retained web output: use artifact=${id} to register a durable reference; upstream completeness is unknown.]`
+      : `${text.slice(0, half)}\n\n[Output excerpt: ${text.length} characters. Use repo_artifact with id=${id}, offset/limit or query to inspect retained output. Omitted text is not proof of success.]\n\n${text.slice(-half)}`;
   return {
     content: [
       { type: "text", text: preview },

@@ -1,3 +1,4 @@
+import { REFERENCE_DIRECTORY, validateResearchConfig } from "./references.mjs";
 import {
   loadGlobalModelSettings,
   modelSettingsPath,
@@ -89,6 +90,10 @@ export async function resolveRepo(root, relative) {
   if (path.isAbsolute(relative))
     throw new Error("Use a repository path relative to the task root.");
   const repo = await fs.realpath(path.resolve(root, relative));
+  if (repo.split(path.sep).includes(REFERENCE_DIRECTORY))
+    throw Error(
+      "Reference snapshots cannot be delegated as work repositories.",
+    );
   if (!isDescendant(root, repo))
     throw new Error("Repository must be a descendant of the task root.");
   const git = await exists(path.join(repo, ".git"));
@@ -109,6 +114,7 @@ export async function loadConfig(root) {
     "model",
     "thinking",
     "roles",
+    "research",
     "direction",
     "layout",
     "documents",
@@ -176,6 +182,7 @@ export async function loadConfig(root) {
     );
   if (config.board !== undefined && typeof config.board !== "boolean")
     throw Error("board must be boolean.");
+  validateResearchConfig(config.research);
   validateModelSettings(config);
   return config;
 }

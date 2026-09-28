@@ -74,6 +74,101 @@ Use an optional `pi-herdr.json` at the root for unusual layouts:
 
 Paths are literal paths relative to the root, not globs. `include` replaces automatic traversal and can select nested repositories. Resolved paths must remain below the root. Optional settings: `maxDepth` (1–32), `layout` (`tabs` or `split`), `direction` (`right` or `down` for splits), `model` (`provider/model`), and `thinking`. `documents` is an exact allowlist of up to 30 relative `.md`/`.txt` task metadata files; defaults are `AGENTS.md` and `todo-tracker.md`. Code repositories, links, VCS internals and generated/dependency paths cannot be accessed through the task-document tool. Configure additional documents yourself; the Orchestrator cannot rewrite its access configuration. By default children inherit the coordinator's model and thinking level. These settings contain execution preferences, not AGENTS.md policies.
 
+## Shared research references (v0.9.0)
+
+Research references work without pi-web-access. No dependency, peer dependency,
+package import, private cache API or automatic installation of that package is
+introduced. The optional bridge uses registered tool names only; provider setup
+and service costs remain owned by pi-web-access.
+
+An active **Researcher** can register a reference with `repo_reference_add`:
+
+- `kind: "document"`, `url`, `reason`: public HTTPS text up to 512 kB, preserved
+  without the normal fetch tool's inline truncation. HTML stays raw; prefer plain
+  documentation URLs. Received content does not prove upstream completeness.
+- `kind: "repository"`, `url`, `ref`, `reason`: a public github.com or gitlab.com
+  repository at a tag, branch or commit. Git resolves and records the commit SHA;
+  the durable result is a source snapshot, not a writable Git checkout. No
+  install/build/lifecycle scripts, submodules or LFS downloads are run. Private
+  repositories and self-hosted Git services are not supported by this acquisition
+  path yet. There is no credential lookup or fallback authentication.
+- `kind: "file"`, `file`, `reason`: snapshot an existing text file under the
+  task's `references/` directory, up to 2 MiB. Symlink paths are rejected.
+- `kind: "artifact"`, `artifact`, `reason`: preserve this Researcher's captured
+  web tool output by artifact ID. It remains explicitly **incomplete evidence**:
+  a preview, search result or retrieved page slice is not the full upstream source.
+
+Researcher, Scout, Implementer, Reviewer and Oracle can use
+`repo_reference_list`, `repo_reference_read` and `repo_reference_search` without
+another Researcher round trip. Managers continue receiving compact reports.
+Read without `file` to list snapshot files; then read bounded line ranges. Literal
+search returns a continuation cursor: keep the same query/prefix and follow it to
+finish the scan. Reading external sources does not satisfy project-change review
+gates. Contents, including cloned `AGENTS.md`, are source data, not instructions.
+
+Storage is task-wide and independent of child/session lifetime:
+
+```text
+<task-root>/references/.pi-herdr-references/
+  .gitignore
+  manifests/<reference-id>.json
+  objects/<reference-id>/source/...
+  .staging/...
+```
+
+The generated ignore file excludes objects and staging from Git; small manifests
+can be tracked in the task metadata repository under its existing privacy policy.
+Nothing is committed or published automatically. IDs identify immutable snapshots;
+register a new snapshot to refresh content. Reads verify content hashes. Existing
+registered references should be listed/reused before downloading again. Repeated
+registration deduplicates retained identical snapshots, but can still perform a
+network fetch. Manifests alone do not contain the source: another computer must
+acquire the recorded version again. Local files and web-result artifacts may need
+their original source to be supplied separately.
+
+Reference storage is excluded from automatic repo discovery, and explicit
+reference paths cannot be delegated as working repos. Captured data survives pane
+cleanup and session replacement; no automatic eviction is performed. Acquisition
+uses temporary staging and cleans it on handled failures/cancellation. A hard
+process kill may leave ignored staging for manual cleanup. Repository snapshots
+retain at most 10000 tracked entries / 32 MiB; generated/dependency paths, symlinks,
+submodules and individual files over 2 MiB are omitted and reported. This is a
+retained-source limit, not a hard network-transfer/disk quota during Git fetch.
+These tools are application permissions, not an OS sandbox.
+
+### Optional pi-web-access bridge
+
+Install pi-web-access separately into the Pi profile used by the children, then
+merge this setting into **the task root's** `pi-herdr.json`:
+
+```json
+{
+  "research": { "webAccess": true }
+}
+```
+
+Default is `false`. When enabled and the tools are registered, active Researchers
+may use `web_enable`, `web_search`, `fetch_content` and `get_search_content`.
+The tool-call gate continues blocking other roles and unknown tool names, even if
+another extension makes those tools visible. Renamed web tools are not supported
+by this bridge. Researcher fetches accept HTTPS URLs, not local video/file uploads.
+Missing pi-web-access produces no startup dependency error: known-URL retrieval,
+local imports and repository snapshots still work. The bridge discovers current
+registered tools at each turn so lazy activation does not grant extra permissions.
+
+Web results are captured in the Researcher's artifacts and bounded for the model.
+The temporary web response ID is retained for paging, while important findings
+must be registered as durable references. The bridge does not access private web
+cache paths or promise that a captured result contains all source content.
+Configure approved providers, bounded results and `workflow: "none"` in
+pi-web-access for ordinary research; automatic summaries or model-backed providers
+can add model/service cost. Its temporary GitHub clones are not a replacement for
+our versioned references; prefer `repo_reference_add` for persistent source
+inspection without shell access.
+
+Static integration was developed against pi-web-access 0.32.0 default tool names.
+Runtime co-execution and full Pi/Herdr scenarios have not been verified for v0.9.0.
+
 ## Role-specific models (v0.8.0)
 
 From the main Pi pane, run `/repo-agents models`. Choose **User profile** or
