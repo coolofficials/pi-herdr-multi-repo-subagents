@@ -74,6 +74,75 @@ Use an optional `pi-herdr.json` at the root for unusual layouts:
 
 Paths are literal paths relative to the root, not globs. `include` replaces automatic traversal and can select nested repositories. Resolved paths must remain below the root. Optional settings: `maxDepth` (1–32), `layout` (`tabs` or `split`), `direction` (`right` or `down` for splits), `model` (`provider/model`), and `thinking`. `documents` is an exact allowlist of up to 30 relative `.md`/`.txt` task metadata files; defaults are `AGENTS.md` and `todo-tracker.md`. Code repositories, links, VCS internals and generated/dependency paths cannot be accessed through the task-document tool. Configure additional documents yourself; the Orchestrator cannot rewrite its access configuration. By default children inherit the coordinator's model and thinking level. These settings contain execution preferences, not AGENTS.md policies.
 
+## Role-specific models (v0.8.0)
+
+From the main Pi pane, run `/repo-agents models`. Choose **User profile** or
+**This task**, then a role, model, and thinking level. **Save** writes the draft;
+**Cancel** or Escape at the role list discards it. **Inherit both** removes that
+scope's override. Orchestrator continues to use Pi's own model selector.
+
+The menu lists registered models with configured authentication and the selected
+model's supported thinking levels. It shows effective values and their source.
+Profile editing previews the profile independently; task overrides may still
+apply. Inherited values in this menu preview the main Pi model; a worker launched
+by a Task Lead inherits that Lead's model instead when no override applies. Choosing a model does not change thinking automatically: select a
+supported level explicitly if the inherited level is incompatible.
+
+- Profile file: `~/.pi/agent/pi-herdr-models.json`, or
+  `$PI_CODING_AGENT_DIR/pi-herdr-models.json` with a custom Pi profile.
+- Task file: `pi-herdr.json` in the main Pi root. Existing discovery, layout and
+  document settings are preserved when saving.
+- Model and thinking resolve independently: **task role → task default → profile
+  role → profile default → requesting parent's current value**.
+- Model IDs must match the registry's exact `provider/model` ID; no fuzzy matching
+  or replacement model is used. Unknown roles and malformed values are errors.
+- Saving is local extension code, with no model invocation or conversation entry.
+  Concurrent menu saves reject stale drafts. A small `.lock/operation.sqlite`
+  beside the settings file coordinates saves; keep this runtime lock out of VCS.
+
+Both files accept `model`, `thinking`, and `roles`. Only the task file also accepts
+repository discovery/layout settings. Example (use model IDs available on your PC):
+
+```json
+{
+  "roles": {
+    "task_lead": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
+    "implementer": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
+    "reviewer": { "model": "openai-codex/gpt-5.5", "thinking": "high" },
+    "oracle": { "model": "openai-codex/gpt-5.5", "thinking": "high" },
+    "scout": { "model": "openai-codex/gpt-5.5", "thinking": "low" },
+    "researcher": { "model": "openai-codex/gpt-5.5", "thinking": "low" }
+  }
+}
+```
+
+This example illustrates the schema, not a cost/quality recommendation. No model
+assignments are installed automatically. Omit fields to inherit; do not use `null`.
+A task-level common `model` overrides profile role models, so omit it when you
+want profile role routing to apply.
+
+### Applying changes
+
+Running conversations and reused workers keep their models. New child launches
+resolve settings before opening a pane and reject unavailable models or unsupported
+thinking. The parent also checks the actual child model/thinking before submitting
+work, so CLI fallback cannot silently run a different model.
+
+An idle child's new conversation (`/new`, including `repo_agent_reset`) reloads
+settings. Its inherited fallback is the parent's model/thinking captured at that
+child's original launch. A checkpoint/compaction or `/reload` in the same
+conversation does not change models. If accepted work is still pending, changing
+conversation does not apply new routing mid-job. Invalid settings at a fresh
+conversation cause a visible initialization error and shutdown; inspect the pane
+and fix the settings before recovery.
+
+The board displays the selected agent's actual model/thinking and a next-session
+preview when settings differ; the details view includes source information.
+The preview uses the inherited values recorded at launch. A future new launch
+from a different parent model can therefore differ from the preview. Older
+agents without model metadata are shown as unknown. Registration/authentication
+checks cannot guarantee provider availability, quota, or successful requests.
+
 ## Hierarchy (v0.6.1)
 
 ```text

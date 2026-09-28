@@ -1,3 +1,8 @@
+import {
+  loadGlobalModelSettings,
+  resolveModelSettings,
+  validateModelSelection,
+} from "./model-settings.mjs";
 import { showChild } from "./presentation.mjs";
 import { runCheck } from "./checks.mjs";
 import fs from "node:fs/promises";
@@ -37,7 +42,13 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { MARKER, readJSON, writeJSON, summarizeMessages } from "./core.mjs";
+import {
+  MARKER,
+  readJSON,
+  writeJSON,
+  summarizeMessages,
+  loadConfig,
+} from "./core.mjs";
 import { liveness, processIdentity } from "./lifecycle.mjs";
 
 export const CHILD_FLAG = "repo-agent-child";
@@ -65,24 +76,30 @@ export default function childBridge(pi: ExtensionAPI) {
   let closing = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let generation = 0;
+  let configuredSession: string | undefined;
+  let applyingModel = false;
   const stop = () => {
     generation++;
     if (timer) clearTimeout(timer);
   };
-  const ready = async (ctx: ExtensionContext, extra = {}) => {
-    if (!dir) return;
-    await writeJSON(path.join(dir, "ready.json"), {
-      instance: processIdentity(),
-      pid: process.pid,
-      pane: process.env.HERDR_PANE_ID,
-      cwd: await fs.realpath(ctx.cwd),
-      managed: !detached,
-      cleanExit: false,
-      sessionId: ctx.sessionManager.getSessionId(),
-      sessionFile: ctx.sessionManager.getSessionFile(),
-      ...extra,
+  const withReady = serialExecutor();
+  const ready = (ctx: ExtensionContext, extra = {}) =>
+    withReady(async () => {
+      if (!dir) return;
+      await writeJSON(path.join(dir, "ready.json"), {
+        instance: processIdentity(),
+        pid: process.pid,
+        pane: process.env.HERDR_PANE_ID,
+        cwd: await fs.realpath(ctx.cwd),
+        managed: !detached,
+        cleanExit: false,
+        model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+        thinking: ctx.thinkingLevel,
+        sessionId: ctx.sessionManager.getSessionId(),
+        sessionFile: ctx.sessionManager.getSessionFile(),
+        ...extra,
+      });
     });
-  };
   const checkpoint = async () => {
     if (dir)
       await writeJSON(path.join(dir, "job-state.json"), {
@@ -771,6 +788,26 @@ export default function childBridge(pi: ExtensionAPI) {
       }),
     );
   registerReport();
+  pi.on("model_select", async (_event, ctx) => {
+    if (
+      isChild() &&
+      dir &&
+      !closing &&
+      !applyingModel &&
+      configuredSession === ctx.sessionManager.getSessionId()
+    )
+      await ready(ctx);
+  });
+  pi.on("thinking_level_select", async (_event, ctx) => {
+    if (
+      isChild() &&
+      dir &&
+      !closing &&
+      !applyingModel &&
+      configuredSession === ctx.sessionManager.getSessionId()
+    )
+      await ready(ctx);
+  });
   pi.on("session_start", async (_event, ctx) => {
     if (!isChild()) return;
     stop();
@@ -830,6 +867,41 @@ export default function childBridge(pi: ExtensionAPI) {
         (await readJSON(path.join(dir!, `${jobId}.repair.json`)))?.mode ===
           "report-only",
       );
+      const previousReady = await readJSON(path.join(dir!, "ready.json"));
+      if (
+        _event.reason === "new" &&
+        !detached &&
+        previousReady?.sessionId &&
+        previousReady.sessionId !== ctx.sessionManager.getSessionId() &&
+        !jobId
+      ) {
+        const selection = resolveModelSettings(
+          role,
+          await loadConfig(launch.root),
+          await loadGlobalModelSettings(launch.globalModelFile),
+          launch.inheritedModel ?? {
+            model: ctx.model
+              ? `${ctx.model.provider}/${ctx.model.id}`
+              : undefined,
+            thinking: ctx.thinkingLevel,
+          },
+        );
+        const model = validateModelSelection(selection, ctx.modelRegistry);
+        applyingModel = true;
+        try {
+          if (!(await pi.setModel(model)))
+            throw Error(
+              `Could not select ${selection.model}. No substitute will be used.`,
+            );
+          if (selection.thinking)
+            pi.setThinkingLevel(
+              selection.thinking as Parameters<typeof pi.setThinkingLevel>[0],
+            );
+        } finally {
+          applyingModel = false;
+        }
+      }
+      configuredSession = ctx.sessionManager.getSessionId();
       applyRole();
       await ready(ctx);
       void watch(ctx, generation);

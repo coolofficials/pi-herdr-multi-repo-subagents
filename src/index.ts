@@ -1,3 +1,5 @@
+import { editModelSettings } from "./model-settings-ui.ts";
+import { validateModelSelection } from "./model-settings.mjs";
 import { CoordinationBusy } from "./coordination-lock.mjs";
 import { showCoordinator } from "./presentation.mjs";
 import { Type } from "@earendil-works/pi-ai";
@@ -62,6 +64,8 @@ export default function extension(pi: ExtensionAPI) {
         `${ctx.cwd}:${ctx.sessionManager.getSessionId()}`,
         new Controller({
           root: state.launch?.root ?? ctx.cwd,
+          validateSelection: (selection: any) =>
+            validateModelSelection(selection, ctx.modelRegistry),
           owner: ctx.sessionManager.getSessionId(),
           storage: state.launch?.storage,
           delegation: child.isChild()
@@ -736,7 +740,8 @@ export default function extension(pi: ExtensionAPI) {
     }),
   );
   pi.registerCommand("repo-agents", {
-    description: "List discovered repositories and managed Herdr agents",
+    description:
+      "Inspect agents, open board, or configure role models with models",
     handler: async (args, ctx) => {
       const [action, ...words] = args.trim().split(/\s+/);
       if (child.isChild()) {
@@ -755,6 +760,10 @@ export default function extension(pi: ExtensionAPI) {
             "Task Leads may use /repo-agents recover <agent-id> for their own children. Other coordination uses tools.",
             "info",
           );
+        return;
+      }
+      if (action === "models") {
+        await editModelSettings(ctx);
         return;
       }
       if (action === "board") {

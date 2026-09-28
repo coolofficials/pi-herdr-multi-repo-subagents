@@ -1,3 +1,8 @@
+import {
+  loadGlobalModelSettings,
+  modelSettingsPath,
+  resolveModelSettings,
+} from "./model-settings.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
@@ -7,18 +12,46 @@ import { readJSON, writeJSON } from "./storage.mjs";
 import { familyRecords } from "./views.mjs";
 import { executionState } from "./execution.mjs";
 import { liveness } from "./lifecycle.mjs";
-import { herdr } from "./core.mjs";
+import { herdr, loadConfig } from "./core.mjs";
 
 export async function boardSnapshot(scope) {
   const parent = await readJSON(path.join(scope, "parent.json"));
   const rows = [];
+  let taskConfig, configError;
+  try {
+    taskConfig = parent?.root ? await loadConfig(parent.root) : {};
+  } catch (error) {
+    configError = String(error);
+  }
+  const globals = new Map();
   for (const record of await familyRecords(scope)) {
     const state = await executionState(record);
     const work =
       record.bundle &&
       (await readJSON(path.join(scope, "work", record.bundle + ".json")));
     const closed = await readJSON(path.join(record.dir, "view-closed.json"));
+    let nextModel,
+      modelError = configError;
+    try {
+      if (modelError) throw Error(modelError);
+      const file = record.globalModelFile ?? modelSettingsPath();
+      if (!globals.has(file))
+        globals.set(file, await loadGlobalModelSettings(file));
+      nextModel = resolveModelSettings(
+        record.role,
+        taskConfig,
+        globals.get(file),
+        record.inheritedModel ?? {},
+      );
+    } catch (error) {
+      modelError = String(error);
+    }
     rows.push({
+      model: state.ready?.model,
+      requestedModel: record.modelSelection,
+      thinking: state.ready?.thinking,
+      nextModel,
+      modelError,
       id: record.id,
       dir: record.dir,
       pane: record.pane,
@@ -102,11 +135,34 @@ export async function runBoard(scope) {
       "k keep  r resume  a completed  q close",
       "",
     ];
+    const modelLines = [];
+    if (!detail && row) {
+      const current = `${row.model ?? "unknown"} · ${row.thinking ?? "unknown"}`;
+      modelLines.push(...wrap(`Model: ${current}`, width - 1));
+      if (row.modelError)
+        modelLines.push(...wrap(`Model config: ${row.modelError}`, width - 1));
+      else if (
+        row.nextModel?.model !== row.model ||
+        row.nextModel?.thinking !== row.thinking
+      )
+        modelLines.push(
+          ...wrap(
+            `Next session: ${row.nextModel?.model ?? "inherit parent"} · ${row.nextModel?.thinking ?? "inherit parent"}`,
+            width - 1,
+          ),
+        );
+    }
+    modelLines.splice(Math.max(0, height - lines.length - 3));
     if (input !== null)
       lines.push("Resume request (Enter send / Esc cancel)", input);
     else if (detail && row) {
       const text = JSON.stringify(
         {
+          model: row.model ?? "unknown (older agent)",
+          thinking: row.thinking,
+          launchRequest: row.requestedModel,
+          nextSession: row.nextModel,
+          modelSettingsError: row.modelError,
           task: row.task,
           role: row.label,
           status: row.status,
@@ -122,14 +178,19 @@ export async function runBoard(scope) {
         .flatMap((line) => wrap(line, width - 1));
       lines.push(...text.slice(offset, offset + height - 8));
     } else {
-      const start = Math.max(0, selected - (height - 10));
+      const capacity = Math.max(
+        1,
+        height - lines.length - modelLines.length - 2,
+      );
+      const start = Math.max(0, selected - capacity + 1);
       for (const [i, r] of rows.entries())
-        if (i >= start && lines.length < height - 2)
+        if (i >= start && i < start + capacity)
           lines.push(
             `${i === selected ? ">" : " "} ${r.keep ? "* " : ""}[${r.status}] ${r.label}${r.usage?.warning ? " CONTEXT" : ""}`,
           );
       if (!rows.length) lines.push("No delegated work yet.");
     }
+    lines.push(...modelLines);
     lines.push(note);
     process.stdout.write(
       "\x1b[H\x1b[2J" +

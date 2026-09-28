@@ -1,3 +1,9 @@
+import {
+  loadGlobalModelSettings,
+  modelSettingsPath,
+  resolveModelSettings,
+  validateModelSettings,
+} from "./model-settings.mjs";
 import { withOperationLock } from "./coordination-lock.mjs";
 import { createTaskPane, shellAvailable } from "./views.mjs";
 import { scopedInstructions } from "./scopes.mjs";
@@ -102,6 +108,7 @@ export async function loadConfig(root) {
     "maxDepth",
     "model",
     "thinking",
+    "roles",
     "direction",
     "layout",
     "documents",
@@ -169,6 +176,7 @@ export async function loadConfig(root) {
     );
   if (config.board !== undefined && typeof config.board !== "boolean")
     throw Error("board must be boolean.");
+  validateModelSettings(config);
   return config;
 }
 export async function discoverRepos(root, config) {
@@ -300,7 +308,9 @@ export class Controller {
     transport = herdr,
     identity = processIdentity(),
     delegation = /** @type {any} */ (undefined),
+    validateSelection = /** @type {any} */ (undefined),
   }) {
+    this.validateSelection = validateSelection;
     this.root = realpathSync(root);
     this.delegation = delegation;
     this.env = env;
@@ -756,6 +766,13 @@ export class Controller {
       const existing = records.find(
         (r) => (r.reservationKey ?? r.path) === key,
       );
+      const globalModelFile = modelSettingsPath(this.env);
+      const selection = resolveModelSettings(
+        role,
+        config,
+        await loadGlobalModelSettings(globalModelFile),
+        { model, thinking },
+      );
       let reused;
       if (existing) {
         const state = await executionState(existing);
@@ -785,6 +802,7 @@ export class Controller {
             bundle,
           });
         }
+        if (this.validateSelection) await this.validateSelection(selection);
         if (
           !state.ready?.cleanExit ||
           liveness(state.ready.instance) !== "dead"
@@ -808,6 +826,7 @@ export class Controller {
         );
         records.splice(records.indexOf(existing), 1);
       }
+      if (this.validateSelection) await this.validateSelection(selection);
       if (exclusive) await this.guardLegacy(selected.path);
       await this.call(["status"], signal, true);
       const layout = await this.call(["pane", "layout", "--current"], signal);
@@ -835,6 +854,9 @@ export class Controller {
         label,
         reservationKey: key,
         fixedRole: true,
+        modelSelection: selection,
+        inheritedModel: { model, thinking },
+        globalModelFile,
         phase: "creating-pane",
         createdAt: new Date().toISOString(),
       };
@@ -910,6 +932,9 @@ export class Controller {
       await writeJSON(this.indexFile, records);
       await writeJSON(path.join(dir, "launch.json"), {
         token: launchToken,
+        modelSelection: selection,
+        inheritedModel: { model, thinking },
+        globalModelFile,
         pane,
         socket: this.env.HERDR_SOCKET_PATH,
         cwd: selected.path,
@@ -947,9 +972,8 @@ export class Controller {
         "--session-dir",
         path.join(dir, "sessions"),
       ];
-      if (config.model ?? model) args.push("--model", config.model ?? model);
-      if (config.thinking ?? thinking)
-        args.push("--thinking", config.thinking ?? thinking);
+      if (selection.model) args.push("--model", selection.model);
+      if (selection.thinking) args.push("--thinking", selection.thinking);
       try {
         await this.call(args, signal, false, 35000);
         const deadline = Date.now() + 5000;
@@ -967,6 +991,14 @@ export class Controller {
           ready.cwd !== selected.path
         )
           throw new Error("Child identity did not match the launch request.");
+        if (selection.model && ready.model !== selection.model)
+          throw Error(
+            `Child selected ${ready.model ?? "no model"}; expected ${selection.model}. No work submitted.`,
+          );
+        if (selection.thinking && ready.thinking !== selection.thinking)
+          throw Error(
+            `Child thinking differs from ${selection.thinking}. No work submitted.`,
+          );
         record.phase = "ready";
         await writeJSON(this.indexFile, records);
         return await this.submit(record, records, task, context, signal, {
