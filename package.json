@@ -16,7 +16,9 @@
     "README.md",
     "LICENSE",
     "examples",
-    "scripts"
+    "scripts",
+    "AGENTS.md",
+    "docs"
   ],
   "engines": {
     "node": ">=22.18"

@@ -2,6 +2,14 @@
 
 Coordinate overall requirements through a task-root Orchestrator, scoped execution through Task Leads, and independent task/project reviews. Children run in visible Herdr panes and return bounded structured briefs. The Orchestrator cannot use arbitrary source-reading, editing or shell tools. Repository children load applicable AGENTS.md normally; response language and project policies remain outside the package.
 
+## Setup by an agent
+
+For installation, configuration, optional integrations, updates and recovery,
+start with [the agent setup guide](docs/agent-setup.md). The root `AGENTS.md`
+provides an entry point for agents. Both files are included in package distribution.
+The guide distinguishes local source features from actually published versions
+and preserves existing settings and active sessions.
+
 ## Requirements and installation
 
 - Pi 0.87.1 or newer with `agent_settled` support, authenticated to your chosen model.
@@ -72,7 +80,7 @@ Use an optional `pi-herdr.json` at the root for unusual layouts:
 }
 ```
 
-Paths are literal paths relative to the root, not globs. `include` replaces automatic traversal and can select nested repositories. Resolved paths must remain below the root. Optional settings: `maxDepth` (1–32), `layout` (`tabs` or `split`), `direction` (`right` or `down` for splits), `model` (`provider/model`), and `thinking`. `documents` is an exact allowlist of up to 30 relative `.md`/`.txt` task metadata files; defaults are `AGENTS.md` and `todo-tracker.md`. Code repositories, links, VCS internals and generated/dependency paths cannot be accessed through the task-document tool. Configure additional documents yourself; the Orchestrator cannot rewrite its access configuration. By default children inherit the coordinator's model and thinking level. These settings contain execution preferences, not AGENTS.md policies.
+Paths are literal paths relative to the root, not globs. `include` replaces automatic traversal and can select nested repositories. Resolved paths must remain below the root. Optional settings: `maxDepth` (1–32), `layout` (`tasks`, `tabs` or `split`), `direction` (`right` or `down` for splits), `model` (`provider/model`), and `thinking`. `documents` is an exact allowlist of up to 30 relative `.md`/`.txt` task metadata files; defaults are `AGENTS.md` and `todo-tracker.md`. Code repositories, links, VCS internals and generated/dependency paths cannot be accessed through the task-document tool. Configure additional documents yourself; the Orchestrator cannot rewrite its access configuration. By default children inherit the coordinator's model and thinking level. These settings contain execution preferences, not AGENTS.md policies.
 
 ## Shared research references (v0.9.0)
 
