@@ -59,6 +59,8 @@ export async function boardSnapshot(scope) {
       bundle: record.bundle,
       label: record.label ?? record.repo,
       task: work?.title,
+      executionMode: work ? (work.executionMode ?? "reviewed") : undefined,
+      executionReason: work?.executionReason,
       status: closed ? "closed" : state.phase,
       taskStatus: work?.status,
       live: state.ready?.instance ? liveness(state.ready.instance) : "unknown",
@@ -143,6 +145,13 @@ export async function runBoard(scope) {
     ];
     const modelLines = [];
     if (!detail && row) {
+      if (row.executionMode)
+        modelLines.push(
+          ...wrap(
+            `Execution: ${row.executionMode === "single" ? "Single · no independent review" : "Reviewed"}${row.executionReason ? " · " + row.executionReason : ""}`,
+            width - 1,
+          ),
+        );
       const current = `${row.model ?? "unknown"} · ${row.thinking ?? "unknown"}`;
       modelLines.push(...wrap(`Model: ${current}`, width - 1));
       if (row.modelError)
@@ -169,6 +178,8 @@ export async function runBoard(scope) {
           launchRequest: row.requestedModel,
           nextSession: row.nextModel,
           modelSettingsError: row.modelError,
+          executionMode: row.executionMode,
+          executionReason: row.executionReason,
           task: row.task,
           role: row.label,
           status: row.status,

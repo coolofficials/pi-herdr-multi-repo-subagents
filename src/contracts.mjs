@@ -45,6 +45,7 @@ export const LEAD_TOOLS = new Set([
 ]);
 export const CHILD_TOOLS = new Set([
   "repo_check",
+  "repo_execution",
   "repo_artifact",
   "repo_checkpoint",
   "repo_source",
@@ -154,6 +155,7 @@ export function publicReport(report) {
       : ["error", "aborted", "cancelled-parent-exited"].includes(report.status)
         ? "Child ended unsuccessfully. Inspect its pane or resolve the blocker before deciding whether to retry; raw failure output is not copied."
         : "No valid structured report. Ask the child to submit repo_agent_report; inspect its pane for raw details.",
+    execution: report.execution,
     usage: report.usage,
     finishedAt: report.finishedAt,
     review: report.review

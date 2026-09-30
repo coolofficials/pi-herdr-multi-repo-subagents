@@ -267,7 +267,71 @@ Scout (formerly Explorer) reads local code. Researcher (formerly Librarian) read
 
 Role permissions are selected at session/job boundaries and checked by tool hooks. A child has a fixed role and task/project for its lifetime. Implementation and review use **separate panes/conversations**. Reset refreshes the same role, not a role switch. No role bundles, multi-harness routing or automatic commits/publication are supplied.
 
-### Completion protocol
+### Automatic execution routing (v0.10.0)
+
+Orchestrator chooses the execution path using the current request and known facts.
+There is no classifier agent, consensus vote, numeric difficulty score or mandatory
+repository survey. Bounded, clear, reversible work with a direct result check uses
+**single execution**. Consequential/uncertain behavior, public/shared contracts,
+security/permissions/data changes, coupled cross-repository behavior, or an explicit
+independent-review requirement uses **reviewed execution**. File/step/repository count
+alone does not determine the route. Unknowns may first be inspected by one bounded
+single worker, which escalates before risky changes. This is model judgment; tooling
+cannot prove that hidden effects were recognized.
+
+For single execution, Orchestrator calls:
+
+```json
+{
+  "action": "create",
+  "title": "Update local display text",
+  "requirements": "Change the specified text and confirm the requested value.",
+  "repos": ["repos/app"],
+  "executionMode": "single",
+  "executionReason": "Local reversible change with a direct result check"
+}
+```
+
+`repo_work create` returns `executionRepo`, task `id` and `project`. Project is optional
+for single creation; the tool creates a standalone project if omitted, and completes
+it together with the single task after its evidence passes. Start ONE `implementer` at that
+`executionRepo` with `bundle=id`. No Task Lead, Reviewer or Oracle is created for this
+path. Several assigned repositories can share one root executor. Omit `repos` only
+for task-root administrative operations, such as preparing directories or cloning
+repositories. These operations have no product-code baseline and must not silently
+expand into code edits; code work needs a new scoped repository task before editing.
+Do not use this mode to circumvent scoped mandatory reviews.
+
+The worker confirms only the requested outcome, reports actual checks and evidence
+references through `repo_agent_report`, and returns a compact report directly to
+Orchestrator. Builds, tests, research and source surveys are not obligatory. The main
+calls `repo_work complete` after the report settles. Single completion is explicitly
+**not independent approval**. Repository receipts bind changed files, declared file
+references, instructions and the current project/task contracts; unrelated files
+remain outside that receipt. This is not a complete dependency graph. Root operation
+receipts rely on reported operation evidence and do not continuously verify cloned
+repository contents. An all-single project finishes through `repo_project complete`
+without Oracle. A project containing any reviewed task still requires Oracle PASS.
+
+If risk/scope/uncertainty exceeds the chosen route, a direct Implementer calls
+`repo_execution` with a concise reason before further edits. The hook blocks further
+execution and completed reports for that job; the worker reports incomplete. This
+escalation does not start another agent. Orchestrator calls `repo_work promote` with
+`executionReason` for an existing repository task, preserving its original baselines,
+execution evidence and review budget. Resume the same worker only for unfinished work
+or remediation. Once it reports readiness, call `repo_request_review` with the **task**
+ID to attach an independent Reviewer directly, then `repo_work complete` after PASS.
+A Task Lead is not inserted retroactively. Requests with a project ID still dispatch
+Oracle. Reviewed work cannot be downgraded to single. Subsequent user refinements to a
+direct task go through Orchestrator so scope and mode remain recorded.
+
+The board and child status widget show the selected mode; the board includes its
+one-line reason. Legacy tasks and calls omitting `executionMode` retain reviewed
+gates. Existing sessions are not migrated or restarted. Policy enforcement is within
+Pi tools/hooks, not an OS sandbox; shell commands, external writers and semantic
+misclassification remain limitations.
+
+### Reviewed completion protocol
 
 1. Orchestrator creates `repo_project` with overall requirements, then `repo_work` tasks containing a goal, acceptance criteria, repository set and verification ownership. Baselines are captured before implementation. Start a `task_lead` at `repo: "."` for each task, passing its task ID as `bundle`.
 2. Task Lead delegates to Implementers in its assigned repositories. It judges readiness **from their conversations and completed reports**, not from reading code. When the coherent task is ready, call `repo_request_review` with the task ID and a concise readiness reason.
@@ -294,7 +358,7 @@ Receiving input alone does not invalidate approval. Unclassified input temporari
 
 Input may arrive during review. Questions can be answered, but accepting a refinement must wait until the active review settles. The receipt remains pending and readable; the user need not submit the same request again. Completed work accepts questions; changes require escalation and explicit reopening by Orchestrator. Raw input stays in the Lead conversation/local evidence and is not automatically forwarded upward.
 
-Changes to overall requirements, acceptance criteria or cross-task contracts must be escalated. This release adds no queue or steering UI. Free-form input in managed Implementer panes is rejected to avoid untracked mutations; use Lead. User shell commands and independently launched processes remain outside the tool policy.
+Changes to overall requirements, acceptance criteria or cross-task contracts must be escalated. This release adds no queue or steering UI. Free-form input in managed Implementer panes is rejected to avoid untracked mutations; use Lead for reviewed hierarchical tasks or Orchestrator for direct tasks. User shell commands and independently launched processes remain outside the tool policy.
 
 ### Tools
 
@@ -303,7 +367,7 @@ Changes to overall requirements, acceptance criteria or cross-task contracts mus
 | `repo_agent_list/start/prompt/read/reset/forget`  | Only the caller's directly managed children; role and task restrictions enforced                   |
 | `repo_agent_recover`                              | Lead: own direct children; Orchestrator: its family, including grandchildren; confirmed exits only |
 | `repo_project create/list/status/complete/revise` | Orchestrator: overall requirements and Oracle completion gate                                      |
-| `repo_work create/revise`                         | Orchestrator: assign or reopen a task, preserving baseline and review budget                       |
+| `repo_work create/revise/complete/promote`        | Orchestrator: assign or reopen a task, preserving baseline and review budget                       |
 | `repo_work list/status`                           | Orchestrator: tasks; Lead: only its assigned task                                                  |
 | `repo_request_review`                             | Lead: validate readiness and request Reviewer; Orchestrator: request Oracle                        |
 | `repo_task_document`                              | Orchestrator: configured task-root metadata allowlist                                              |
@@ -384,6 +448,15 @@ npm run format:check
 
 `npm run test:live -- TASK_ROOT EVIDENCE_DIRECTORY` runs the current hierarchy scenario inside a dedicated Herdr pane against a fresh `create-demo.mjs` fixture. It starts actual model sessions using installed Pi settings, retains panes/evidence, and checks two task approvals, approval reuse, final Oracle and bounded manager permissions. Use a separate named Herdr test server; close only the test-owned processes afterward. The saved launch prevents blind resubmission on retry. `npm pack` runs prepack checks, including unit tests; it does not run model-backed live tests.
 
+`node scripts/test-routing-live.mjs /absolute/new-fixture-directory` creates isolated
+Git fixtures and runs four actual Pi/Herdr routing scenarios: natural clone and
+documentation requests, an explicitly induced review escalation, and the reviewed
+Task Lead workflow. Run inside a genuine dedicated Herdr pane with a separate Pi
+profile configured to load this checkout and a usable provider. These model calls
+consume provider usage. Saved launch intents prevent blind prompt resubmission;
+inspect retained evidence after a failure. This is a bounded behavior check, not
+a classification accuracy or cost benchmark.
+
 The package has no runtime dependencies beyond Pi-provided peers. `pi` manifest paths and an npm file allowlist limit the archive to the extension, documentation, license and example generator. Do not publish without selecting your own package ownership and version.
 
 Generate an isolated example (requires Git and jj):
@@ -448,7 +521,8 @@ request for the Orchestrator; `q` exits the board. `/repo-agents board` opens a
 missing board. A follow-up is a user request, not automatic approval or adoption
 of an old parent's agents.
 
-After approved task completion and its Lead's settled report, idle owned agents
+After reviewed task completion and its Lead's settled report, or direct task
+completion from its settled Implementer evidence, idle owned agents
 exit and their shell panes close. Reports, verification artifacts and sessions
 remain. Unknown processes, active jobs, detached agents, user-kept panes and
 shells with background children are retained. Cleanup closes individual verified

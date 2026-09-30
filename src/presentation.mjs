@@ -76,6 +76,7 @@ export function describe({
   children = [],
   tasks,
   parent,
+  executionMode,
 }) {
   const waiting = children.filter((c) => c.pending && !c.issue);
   const attention = children.filter((c) => c.issue);
@@ -105,6 +106,10 @@ export function describe({
   lines.push(
     `State: ${state}${repo && repo !== "." ? ` | Repo: ${short(repo, 48)}` : ""}${parent ? ` | Reports to: ${roleTitle(parent)}` : ""}`,
   );
+  if (executionMode)
+    lines.push(
+      `Execution: ${executionMode === "single" ? "Single · no independent review" : "Reviewed"}`,
+    );
   const visible = [...attention, ...waiting];
   for (const child of visible.slice(0, 3)) {
     const target =
@@ -185,6 +190,9 @@ async function childView(pi, ctx, launch, dir, coordinator) {
       title,
       repo,
       own,
+      executionMode: own.request?.contract?.directManager
+        ? own.request.contract.executionMode
+        : undefined,
       idle: ctx.isIdle(),
       children,
       parent:

@@ -1,3 +1,4 @@
+import { executionMode, executionSelection } from "./routing.mjs";
 import { reviewProgress } from "./progress.mjs";
 import { registerProgress, requireProgress } from "./documents.mjs";
 import fs from "node:fs/promises";
@@ -78,6 +79,9 @@ export async function listWork(scope) {
       title: w.title,
       status: w.status,
       repos: Object.keys(w.repos),
+      executionMode: executionMode(w),
+      executionReason: w.executionReason,
+      rootOperation: w.rootOperation ?? false,
     }));
 }
 export async function listProjects(scope) {
@@ -149,17 +153,23 @@ export async function createWork(
     title = /** @type {string | undefined} */ (undefined),
     requirements = /** @type {string | undefined} */ (undefined),
     repos = /** @type {string[]} */ ([]),
+    executionMode: selectedMode = "reviewed",
+    executionReason = /** @type {string|undefined} */ (undefined),
   },
 ) {
   assertRoot(client);
+  const route = executionSelection(selectedMode, executionReason);
   validateRequirements(requirements);
   if (
     !title?.trim() ||
     title.length > 160 ||
-    !repos.length ||
+    (!repos.length && selectedMode !== "single") ||
     repos.length > 12
   )
     throw new Error("Provide a task title and 1–12 repositories.");
+  const standalone = !project && selectedMode === "single";
+  if (standalone)
+    project = (await createProject(client, { title, requirements })).id;
   const scope = scopeOf(client),
     p = await getProject(scope, project);
   if (p.tasks.length >= 32)
@@ -178,7 +188,9 @@ export async function createWork(
   for (const item of await listWork(scope)) {
     if (
       item.status !== "completed" &&
-      item.repos.some((r) => selected.some((x) => x.repo === r))
+      (!selected.length ||
+        item.rootOperation ||
+        item.repos.some((r) => selected.some((x) => x.repo === r)))
     )
       throw new Error(
         "An unfinished task owns a requested repository. Finish that task first; tasks sharing a checkout are serialized.",
@@ -194,10 +206,15 @@ export async function createWork(
     id: randomUUID(),
     schema: 2,
     project,
+    projectRevision: p.revision,
     title,
     requirements,
     revision: 1,
     status: "working",
+    ...route,
+    directManager: selectedMode === "single",
+    executionRepo: selected.length === 1 ? selected[0].repo : ".",
+    rootOperation: selected.length === 0,
     repos: Object.create(null),
     reviews: [],
     reviewLimit: 3,
@@ -217,6 +234,7 @@ export async function createWork(
     work.repos[r.repo] = { path: r.path, baseline, base: base.fingerprint };
   }
   p.tasks.push(work.id);
+  if (standalone) p.standalone = true;
   p.status = "working";
   await save(scope, "work", work);
   await save(scope, "projects", p);
@@ -227,6 +245,8 @@ export async function createWork(
     requirements,
     repos: Object.keys(work.repos),
     status: work.status,
+    ...route,
+    executionRepo: work.executionRepo,
   };
 }
 export async function authorizeDelegation(client, { role, bundle, repo }) {
@@ -266,14 +286,44 @@ export async function authorizeDelegation(client, { role, bundle, repo }) {
         w.members.filter((m) => m.role === "reviewer"),
       );
   } else {
-    if (!["task_lead", "oracle", "scout", "researcher"].includes(role))
-      throw new Error(
-        "Orchestrator delegates implementation and local review through a Task Lead.",
-      );
+    if (["implementer", "reviewer"].includes(role)) {
+      const w = await getWork(scopeOf(client), bundle);
+      if (!w.directManager)
+        throw Error(
+          "Orchestrator delegates implementation and local review through a Task Lead.",
+        );
+      if (w.status === "completed")
+        throw Error("Reopen the task before requesting further work.");
+      if ((await getProject(scopeOf(client), w.project)).status === "reviewing")
+        throw Error("Finish Oracle review before changing tasks.");
+      if (role === "implementer" && repo !== w.executionRepo)
+        throw Error(
+          "Single task uses one execution agent in its assigned executionRepo.",
+        );
+      if (
+        role === "reviewer" &&
+        (repo !== "." ||
+          executionMode(w) !== "reviewed" ||
+          w.status !== "candidate")
+      )
+        throw Error(
+          "Promote and declare task candidacy before independent review.",
+        );
+      if (role === "reviewer" && w.reviews.length >= w.reviewLimit)
+        throw Error("Task review budget exhausted; ask the user to extend it.");
+      if (role === "implementer" && w.status === "reviewing")
+        await idleMembers(
+          client,
+          w.members.filter((m) => m.role === "reviewer"),
+        );
+    } else if (!["task_lead", "oracle", "scout", "researcher"].includes(role))
+      throw Error("Unknown delegation role.");
     if (["task_lead", "oracle"].includes(role) && repo !== ".")
       throw new Error("Task Lead and Oracle run at the task root (repo='.').");
     if (role === "task_lead") {
       const w = await getWork(scopeOf(client), bundle);
+      if (w.directManager)
+        throw Error("Direct execution tasks do not use a Task Lead.");
       if (w.status === "completed")
         throw new Error("Reopen the task before requesting further work.");
       if ((await getProject(scopeOf(client), w.project)).status === "reviewing")
@@ -380,6 +430,7 @@ async function makeReview(client, value, record, jobId, kind, repos) {
     requirementsRevision: value.revision,
     noteRevision: value.noteRevision ?? 0,
     inputRevision: value.inputRevision ?? 0,
+    executionMode: executionMode(value),
     targets,
   };
   value.reviews.push(review);
@@ -430,10 +481,11 @@ export async function prepareAssignment(client, record, jobId, role, bundle) {
       id: w.id,
       revision: w.revision,
       noteRevision: w.noteRevision,
-      reviewJob: w.reviews.at(-1).jobId,
+      reviewJob: w.reviews.at(-1)?.jobId ?? null,
       requirements: w.requirements,
       notes: w.notes,
       brief: w.completionBrief,
+      executionMode: executionMode(w),
     }));
     // Persist the exact task approval set in the oracle contract and project review.
     p.reviews.at(-1).taskApprovals = contract.taskApprovals.map(
@@ -477,6 +529,8 @@ export async function prepareAssignment(client, record, jobId, role, bundle) {
     };
   }
   const member = { id: record.id, dir: record.dir, role, repo: record.repo };
+  if (w.directManager && role === "implementer")
+    w.executor = { ...member, jobId };
   if (!w.members.some((m) => m.id === record.id)) w.members.push(member);
   if (role === "reviewer") {
     await idleMembers(client, w.members, record.id);
@@ -500,9 +554,17 @@ export async function prepareAssignment(client, record, jobId, role, bundle) {
     requirementsRevision: w.revision,
     notes: w.notes,
     repos: Object.keys(w.repos),
+    root: client.root,
+    workScope: scope,
+    projectRevision:
+      w.projectRevision ?? (await getProject(scope, w.project)).revision,
+    executionMode: executionMode(w),
+    executionReason: w.executionReason,
+    directManager: w.directManager ?? false,
   };
 }
 async function reviewValid(value) {
+  if (executionMode(value) === "single") return false;
   const latest = value.reviews.at(-1);
   if (!latest) return false;
   const report = await readJSON(
@@ -535,15 +597,191 @@ async function reviewValid(value) {
         task.status !== "completed" ||
         task.revision !== approval.revision ||
         task.noteRevision !== approval.noteRevision ||
-        task.reviews.at(-1)?.jobId !== approval.reviewJob ||
-        !(await reviewValid(task))
+        (task.reviews.at(-1)?.jobId ?? null) !== approval.reviewJob ||
+        !(await completionValid(task))
       )
         return false;
     }
   }
   return true;
 }
+async function directReport(work) {
+  const executor = work.executor;
+  if (!executor) throw Error("Direct task has no execution agent report.");
+  const state = await executionState(executor);
+  if (
+    state.pending ||
+    state.phase !== "settled" ||
+    state.request?.jobId !== executor.jobId ||
+    state.request?.bundle !== work.id ||
+    state.request?.contract?.requirementsRevision !== work.revision ||
+    state.request?.contract?.projectRevision !== work.projectRevision ||
+    state.report?.brief?.outcome !== "completed" ||
+    !state.report.brief.checks?.length ||
+    !state.report.brief.references?.length
+  )
+    throw Error(
+      "Direct completion needs the current settled Implementer report with actual checks and evidence references.",
+    );
+  if (
+    executionMode(work) === "single" &&
+    (await readJSON(
+      path.join(executor.dir, `${executor.jobId}.review-required.json`),
+    ))
+  )
+    throw Error(
+      "Execution requested independent review. Promote this task; single completion is blocked.",
+    );
+  return state.report;
+}
+async function completionValid(work) {
+  if (executionMode(work) !== "single") return reviewValid(work);
+  if (
+    work.status !== "completed" ||
+    !work.singleCompletion ||
+    work.pendingInput ||
+    work.escalation
+  )
+    return false;
+  try {
+    const report = await directReport(work);
+    const receipt = work.singleCompletion;
+    const project = await getProject(receipt.scope, work.project);
+    if (
+      receipt.jobId !== report.jobId ||
+      receipt.revision !== work.revision ||
+      receipt.projectRevision !== project.revision
+    )
+      return false;
+    for (const [file, expected] of Object.entries(receipt.files))
+      if (
+        JSON.stringify(await fileState(receipt.root, file)) !==
+        JSON.stringify(expected)
+      )
+        return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function completeDirectWork(client, work) {
+  const scope = scopeOf(client);
+  await requireProgress(client.root, scope);
+  requireClassifiedInputs(work);
+  await idleMembers(client, work.members);
+  const project = await getProject(scope, work.project);
+  if (work.status === "completed") {
+    if (!(await completionValid(work)))
+      throw Error(
+        "Completed task evidence is stale. Reopen before accepting new work.",
+      );
+    return workStatus(client, work.id);
+  }
+  if (project.status === "reviewing")
+    throw Error("Finish Oracle before changing task state.");
+  if (project.revision !== work.projectRevision)
+    throw Error(
+      "Project requirements changed; revise and resume this task before completion.",
+    );
+  const report = await directReport(work);
+  if (executionMode(work) === "reviewed" && !(await reviewValid(work)))
+    throw Error(
+      "Direct task completion requires a current independent Reviewer PASS.",
+    );
+  if (executionMode(work) === "single") {
+    const files = Object.create(null);
+    for (const [repo, state] of Object.entries(work.repos)) {
+      const base = await readJSON(state.baseline),
+        current = await snapshot(state.path);
+      for (const file of new Set([
+        ...Object.keys(base.entries),
+        ...Object.keys(current.entries),
+      ])) {
+        const before = base.entries[file],
+          after = current.entries[file];
+        if (before?.hash !== after?.hash || before?.mode !== after?.mode)
+          files[path.join(repo, file)] = after
+            ? { hash: after.hash, mode: after.mode }
+            : null;
+      }
+    }
+    const request = await readJSON(
+      path.join(work.executor.dir, "request.json"),
+    );
+    for (const instruction of request.contract.instructions ?? [])
+      files[instruction.file] = await fileState(client.root, instruction.file);
+    for (const ref of report.brief.references ?? []) {
+      if (Object.keys(work.repos).some((repo) => ref.startsWith(repo + "/"))) {
+        try {
+          files[ref] = await fileState(client.root, ref);
+        } catch {
+          /* Non-file artifact references stay in the report. */
+        }
+      }
+    }
+    work.singleCompletion = {
+      scope,
+      root: client.root,
+      jobId: report.jobId,
+      revision: work.revision,
+      projectRevision: project.revision,
+      files,
+    };
+  }
+  work.status = "completed";
+  work.completedAt = new Date().toISOString();
+  work.completionBrief = publicReport(report)?.brief;
+  await save(scope, "work", work);
+  for (const member of work.members.filter((m) => m.role === "implementer"))
+    await writeJSON(path.join(member.dir, "retired.json"), {
+      reason: "task-completed",
+      at: new Date().toISOString(),
+    });
+  if (project.standalone && executionMode(work) === "single")
+    await projectAction(client, { action: "complete", id: project.id });
+  return workStatus(client, work.id);
+}
+export async function promoteWork(client, id, reason) {
+  assertRoot(client);
+  executionSelection("single", reason);
+  const scope = scopeOf(client),
+    work = await getWork(scope, id);
+  await requireProgress(client.root, scope);
+  const project = await getProject(scope, work.project);
+  if (project.status === "reviewing")
+    throw Error("Finish Oracle before promoting a task.");
+  await idleMembers(client, work.members);
+  if (work.lead) await idleMembers(client, [work.lead]);
+  if (executionMode(work) === "reviewed") return workStatus(client, id);
+  if (!Object.keys(work.repos).length)
+    throw Error(
+      "Root administrative work has no code baseline. Create a reviewed task in the affected repositories before code edits; preserve this operation's evidence.",
+    );
+  work.executionMode = "reviewed";
+  work.executionReason = reason.trim();
+  work.routeHistory ??= [];
+  work.routeHistory.push({
+    mode: "reviewed",
+    reason: reason.trim(),
+    at: new Date().toISOString(),
+  });
+  work.status = "working";
+  project.status = "working";
+  await save(scope, "work", work);
+  await save(scope, "projects", project);
+  return {
+    ...(await workStatus(client, id)),
+    instruction:
+      "Original baselines, reports, pane and review budget retained. If the executor already delivered completed work, request Reviewer directly; otherwise resume that executor, then request Reviewer. No Task Lead is needed.",
+  };
+}
 export async function approvalStatus(value) {
+  if (executionMode(value) === "single")
+    return {
+      valid: false,
+      reason: "single_execution_not_independently_reviewed",
+      nextAction: "inspect_execution_report",
+    };
   if (await reviewValid(value)) return { valid: true };
   const latest = value.reviews.at(-1);
   if (!latest)
@@ -585,6 +823,10 @@ export async function workStatus(client, id, complete = false, commit = true) {
   if (client.delegation) assertTaskOwner(client, id);
   const scope = scopeOf(client),
     w = await getWork(scope, id);
+  if (complete && w.directManager) {
+    assertRoot(client);
+    return completeDirectWork(client, w);
+  }
   if (complete) {
     await requireProgress(client.root, scope);
     assertTaskOwner(client, id);
@@ -631,6 +873,11 @@ export async function workStatus(client, id, complete = false, commit = true) {
     revision: w.revision,
     status: w.status,
     repos: Object.keys(w.repos),
+    executionMode: executionMode(w),
+    executionReason: w.executionReason,
+    executionRepo: w.executionRepo,
+    directManager: w.directManager ?? false,
+    completionValid: await completionValid(w),
     reviewValid: await reviewValid(w),
     approvalStatus: await approvalStatus(w),
     attempts: w.reviews.length,
@@ -638,13 +885,27 @@ export async function workStatus(client, id, complete = false, commit = true) {
   };
 }
 export async function taskCandidate(client, id) {
-  assertTaskOwner(client, id);
   const scope = scopeOf(client),
     w = await getWork(scope, id);
+  if (w.directManager) assertRoot(client);
+  else assertTaskOwner(client, id);
+  if (executionMode(w) !== "reviewed")
+    throw Error(
+      "Promote single execution before requesting independent review.",
+    );
   if (w.status === "completed") throw new Error("Task is already completed.");
   requireClassifiedInputs(w);
   await idleMembers(client, w.members);
-  for (const repo of Object.keys(w.repos)) {
+  if (w.directManager) {
+    if ((await getProject(scope, w.project)).revision !== w.projectRevision)
+      throw Error(
+        "Project requirements changed; revise the direct task before review.",
+      );
+    await directReport(w);
+  }
+  for (const repo of w.directManager
+    ? [w.executionRepo]
+    : Object.keys(w.repos)) {
     const implementer = w.members
       .filter(
         (m) =>
@@ -683,8 +944,14 @@ async function approvedTasks(client, p) {
   for (const id of p.tasks) {
     const w = await getWork(scopeOf(client), id);
     requireClassifiedInputs(w);
-    if (w.status !== "completed" || !(await reviewValid(w)))
+    if (w.status !== "completed" || !(await completionValid(w)))
       throw new Error(`Task ${id} is incomplete or its approval is stale.`);
+    if (w.directManager) {
+      await idleMembers(client, w.members);
+      await directReport(w);
+      tasks.push(w);
+      continue;
+    }
     if (!w.lead) throw new Error("Task has no lead report.");
     await idleMembers(client, w.members);
     await idleMembers(client, [w.lead]);
@@ -733,22 +1000,33 @@ export async function projectAction(
     await requireProgress(client.root, scope);
     const tasks = await approvedTasks(client, p);
     if (action === "complete") {
-      if (!(await reviewValid(p)))
-        throw new Error("Overall completion requires a current Oracle PASS.");
-      const expected = p.reviews.at(-1).taskApprovals;
       if (
+        tasks.some((w) => executionMode(w) === "reviewed") &&
+        !(await reviewValid(p))
+      )
+        throw new Error("Overall completion requires a current Oracle PASS.");
+      const expected = p.reviews.at(-1)?.taskApprovals;
+      if (
+        expected &&
         JSON.stringify(expected) !==
-        JSON.stringify(
-          tasks.map((w) => ({
-            id: w.id,
-            revision: w.revision,
-            noteRevision: w.noteRevision,
-            reviewJob: w.reviews.at(-1).jobId,
-          })),
-        )
+          JSON.stringify(
+            tasks.map((w) => ({
+              id: w.id,
+              revision: w.revision,
+              noteRevision: w.noteRevision,
+              reviewJob: w.reviews.at(-1)?.jobId ?? null,
+            })),
+          )
       )
         throw new Error("Task approvals changed after Oracle review.");
     }
+    if (
+      action === "candidate" &&
+      tasks.every((w) => executionMode(w) === "single")
+    )
+      throw Error(
+        "All tasks use single execution; call repo_project complete without Oracle.",
+      );
     p.status = action === "complete" ? "completed" : "candidate";
     await save(scope, "projects", p);
   }
@@ -779,6 +1057,9 @@ export async function projectAction(
     revision: p.revision,
     status: p.status,
     tasks: p.tasks,
+    requiresOracle: (
+      await Promise.all(p.tasks.map((task) => getWork(scope, task)))
+    ).some((w) => executionMode(w) === "reviewed"),
     oracleValid: valid,
     attempts: p.reviews.length,
     reviewLimit: p.reviewLimit,
@@ -800,12 +1081,16 @@ export async function reviseWork(client, id, requirements) {
     if (
       other.id !== id &&
       other.status !== "completed" &&
-      other.repos.some((r) => w.repos[r])
+      (w.rootOperation ||
+        other.rootOperation ||
+        other.repos.some((r) => w.repos[r]))
     )
       throw new Error("Another unfinished task owns this checkout.");
   w.history ??= [];
   w.history.push({ revision: w.revision, requirements: w.requirements });
   w.requirements = requirements;
+  w.projectRevision = p.revision;
+  delete w.singleCompletion;
   delete w.approvalOnly;
   delete w.escalation;
   w.revision++;
@@ -817,8 +1102,9 @@ export async function reviseWork(client, id, requirements) {
     id,
     revision: w.revision,
     status: w.status,
-    instruction:
-      "Resume its Task Lead. Original baseline and review budget are preserved; previous approvals are stale.",
+    instruction: w.directManager
+      ? "Resume its direct Implementer; mode and baseline are preserved."
+      : "Resume its Task Lead. Original baseline and review budget are preserved; previous approvals are stale.",
   };
 }
 export async function taskNote(

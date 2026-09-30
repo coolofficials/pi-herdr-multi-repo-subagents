@@ -75,6 +75,61 @@ async function child(t, options = {}) {
   if (options.coordinator) bridge.setCoordinator(options.coordinator);
   return { dir, emit, ctx, commands, registered, shutdowns: () => shutdowns };
 }
+test("direct worker escalation blocks more execution and completed reports", async (t) => {
+  const { dir, emit, registered } = await child(t, { role: "implementer" });
+  await writeJSON(path.join(dir, "request.json"), {
+    jobId: "job-1",
+    owner: "parent",
+    role: "implementer",
+    bundle: "task",
+    contract: { directManager: true, executionMode: "single" },
+  });
+  await emit("input", { text: `${MARKER}job-1\nInspect bounded work` });
+  await registered
+    .get("repo_execution")
+    .execute("call", { reason: "Shared API contract discovered" });
+  assert.equal(
+    (await emit("tool_call", { toolName: "read", input: { path: "file" } }))
+      .block,
+    true,
+  );
+  const report = registered.get("repo_agent_report");
+  await assert.rejects(
+    report.execute("call", {
+      outcome: "completed",
+      summary: "Done",
+      checks: ["checked"],
+      references: ["file"],
+    }),
+    /escalation blocks/,
+  );
+  await report.execute("call", {
+    outcome: "incomplete",
+    summary: "Needs independent review",
+    risks: ["Shared API contract"],
+  });
+  await emit("agent_before_settle", { outcome: "completed" });
+  await emit("agent_settled");
+  const result = await readJSON(path.join(dir, "job-1.result.json"));
+  assert.equal(result.execution.reviewRequired, true);
+  assert.equal(result.brief.outcome, "incomplete");
+});
+test("direct worker report requires proportionate check evidence", async (t) => {
+  const { dir, emit, registered } = await child(t, { role: "implementer" });
+  await writeJSON(path.join(dir, "request.json"), {
+    jobId: "job-1",
+    owner: "parent",
+    role: "implementer",
+    contract: { directManager: true, executionMode: "single" },
+  });
+  await emit("input", { text: `${MARKER}job-1\nDo bounded work` });
+  await assert.rejects(
+    registered
+      .get("repo_agent_report")
+      .execute("call", { outcome: "completed", summary: "Done" }),
+    /actual checks/,
+  );
+});
 test("child captures at settled, not agent_end, and retains language from the model", async (t) => {
   const { dir, emit } = await child(t);
   const input = await emit("input", { text: `${MARKER}job-1\nDo work` });

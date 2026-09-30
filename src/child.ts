@@ -1,3 +1,4 @@
+import { singleGuidance } from "./routing.mjs";
 import {
   addReference,
   listReferences,
@@ -193,6 +194,17 @@ export default function childBridge(pi: ExtensionAPI) {
         review,
         taskApproval,
         role,
+        execution: request?.contract?.directManager
+          ? {
+              mode: request.contract.executionMode,
+              reviewRequired: Boolean(
+                await readJSON(path.join(dir, `${id}.review-required.json`)),
+              ),
+              reason: (
+                await readJSON(path.join(dir, `${id}.review-required.json`))
+              )?.reason,
+            }
+          : undefined,
         bundle: request?.bundle,
         sessionFile: ctx.sessionManager.getSessionFile(),
         finishedAt: new Date().toISOString(),
@@ -426,7 +438,8 @@ export default function childBridge(pi: ExtensionAPI) {
     webAccess = (await loadConfig(launch.root)).research?.webAccess === true;
     applyRole();
     event.systemPromptOptions.selectedTools = allowed();
-    event.systemPromptOptions.sections.pi_repo_role = roleGuidance(role);
+    event.systemPromptOptions.sections.pi_repo_role =
+      roleGuidance(role) + singleGuidance(request?.contract);
     if (role === "researcher")
       event.systemPromptOptions.sections.pi_repo_role += `\nOptional web bridge: ${webAccess ? "enabled" : "disabled"}; registered allowed tools: ${webTools().join(", ") || "none"}. Missing web tools do not prevent repo_reference_add for known URLs, repositories or local reference text. Web provider configuration belongs to pi-web-access. Use workflow=none for ordinary search, bounded retrieval, and approved providers; never send private task content to public search. Web clones/cache are temporary: register important sources in the durable store before handoff. Prefer a pinned repository reference to a temporary clone requiring unrestricted shell access.`;
     if (localReceipt)
@@ -442,6 +455,20 @@ export default function childBridge(pi: ExtensionAPI) {
       return {
         block: true,
         reason: `Tool is not allowed for the ${role} role.`,
+      };
+    if (
+      dir &&
+      jobId &&
+      request?.contract?.directManager &&
+      (await readJSON(path.join(dir, `${jobId}.review-required.json`))) &&
+      !["repo_agent_report", "repo_artifact", "repo_execution"].includes(
+        event.toolName,
+      )
+    )
+      return {
+        block: true,
+        reason:
+          "Independent review requested. Stop execution and report incomplete to Orchestrator; do not widen scope.",
       };
     if (role === "researcher" && event.toolName === "fetch_content") {
       const input = event.input as any;
@@ -507,6 +534,34 @@ export default function childBridge(pi: ExtensionAPI) {
     }
     return retained ?? undefined;
   });
+  pi.registerTool(
+    defineTool({
+      name: "repo_execution",
+      label: "Escalate execution for review",
+      description:
+        "Direct Implementer only: record newly discovered risk, scope or uncertainty BEFORE risky edits. Blocks further execution and completed reports for this job; report incomplete with the reason and let Orchestrator promote/re-scope. Does not spawn reviewers or rerun work.",
+      parameters: Type.Object({
+        reason: Type.String({ minLength: 1, maxLength: 400 }),
+      }),
+      async execute(_call, params) {
+        const work = activeRequest();
+        if (role !== "implementer" || !work.contract?.directManager)
+          throw Error("Only a direct Implementer can escalate execution.");
+        if (!params.reason.trim())
+          throw Error("Explain the newly discovered risk.");
+        await writeJSON(path.join(dir!, `${jobId}.review-required.json`), {
+          reason: params.reason.trim(),
+          jobId,
+          at: new Date().toISOString(),
+        });
+        return result({
+          reviewRequired: true,
+          instruction:
+            "Stop execution and report incomplete with the reason. Orchestrator must resolve the scope/review decision.",
+        });
+      },
+    }),
+  );
   pi.registerTool(
     defineTool({
       name: "repo_check",
@@ -892,6 +947,22 @@ export default function childBridge(pi: ExtensionAPI) {
         async execute(_call, params) {
           const work = activeRequest();
           const brief = validateBrief(params);
+          if (
+            role === "implementer" &&
+            work.contract?.directManager &&
+            brief.outcome === "completed"
+          ) {
+            if (
+              await readJSON(path.join(dir!, `${jobId}.review-required.json`))
+            )
+              throw Error(
+                "Review escalation blocks completed outcome. Report incomplete with the reason; Orchestrator must resolve it.",
+              );
+            if (!brief.checks.length || !brief.references.length)
+              throw Error(
+                "Direct execution completion needs actual checks and evidence references; do not claim independent approval.",
+              );
+          }
           let review;
           let taskApproval;
           if (role === "task_lead" && brief.outcome === "completed") {
@@ -1129,7 +1200,10 @@ export default function childBridge(pi: ExtensionAPI) {
           localInputTurn = true;
         } else if (["implementer"].includes(role)) {
           ctx.ui.notify(
-            "Send refinements to the Task Lead pane so they remain in the task/review flow.",
+            (await readJSON(path.join(dir, "request.json")))?.contract
+              ?.directManager
+              ? "Send refinements to Orchestrator so the task scope and execution mode remain recorded."
+              : "Send refinements to the Task Lead pane so they remain in the task/review flow.",
             "warning",
           );
           return { action: "handled" };

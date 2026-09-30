@@ -183,7 +183,8 @@ export async function maintainViews(client) {
           ),
         ));
       if (work?.status !== "completed") continue;
-      const lead = record.role === "oracle" ? record : work.lead;
+      const lead =
+        record.role === "oracle" ? record : (work.lead ?? work.executor);
       if (!lead) continue;
       const leadState = await executionState(lead);
       if (leadState.pending || leadState.report?.brief?.outcome !== "completed")

@@ -27,6 +27,7 @@ import {
   getWork,
   reviseWork,
   reopenReview,
+  promoteWork,
   projectAction,
   taskNote,
   extendReview,
@@ -417,7 +418,7 @@ export default function extension(pi: ExtensionAPI) {
       name: "repo_agent_start",
       label: "Delegate repository work",
       description:
-        "Open a role-specific Herdr pane and submit scoped work. Orchestrator may start task_lead/oracle at repo='.' and optional scout/researcher. Task Lead may start implementer in assigned repos, independent reviewer through repo_request_review, and optional researchers. Keep roles in separate panes. Reports return only to the immediate manager; end the turn when waiting. Never retry uncertain delivery blindly.",
+        "Open a role-specific Herdr pane and submit scoped work. For a single task, Orchestrator starts ONE implementer at executionRepo returned by repo_work; it reports directly. Promoted direct tasks also permit direct Reviewer via repo_request_review. Otherwise Orchestrator may start task_lead/oracle at repo='.' and optional scout/researcher. Task Lead may start implementer in assigned repos, independent reviewer through repo_request_review, and optional researchers. Keep roles in separate panes. Reports return only to the immediate manager; end the turn when waiting. Never retry uncertain delivery blindly.",
       parameters: Type.Object({
         repo: Type.String(),
         role,
@@ -585,7 +586,7 @@ export default function extension(pi: ExtensionAPI) {
       name: "repo_work",
       label: "Reviewable work bundle",
       description:
-        "Orchestrator creates a task within a project before implementation, or revises its requirements. reopen_review preserves execution evidence and requirements for approval-only recovery; revise is for changed work. Task Lead reads its own status. Use repo_request_review to declare readiness; repo_agent_report outcome=completed checks Reviewer PASS and commits task completion. Completed tasks sharing changed files may need renewed approval. Do not request review after every small edit; batch a coherent completion candidate.",
+        "Select executionMode=single with a one-line executionReason for bounded reversible work: one direct Implementer, then complete from its settled evidence report; project is optional; its standalone project is created and completed automatically. Omit repos for task-root administrative operations only. Multiple existing repos may share one single executor at the task root. Otherwise executionMode=reviewed (default): Task Lead, independent Reviewer, final Oracle. Promote adds independent review to the same repository task without repeating execution. Never downgrade to bypass review. Orchestrator creates a task within a project before implementation, or revises its requirements. reopen_review preserves execution evidence and requirements for approval-only recovery; revise is for changed work. Task Lead reads its own status. Use repo_request_review to declare readiness; repo_agent_report outcome=completed checks Reviewer PASS and commits task completion. Completed tasks sharing changed files may need renewed approval. Do not request review after every small edit; batch a coherent completion candidate.",
       parameters: Type.Object({
         action: Type.Union([
           Type.Literal("create"),
@@ -593,13 +594,19 @@ export default function extension(pi: ExtensionAPI) {
           Type.Literal("status"),
           Type.Literal("revise"),
           Type.Literal("reopen_review"),
+          Type.Literal("complete"),
+          Type.Literal("promote"),
         ]),
         id: Type.Optional(Type.String()),
         project: Type.Optional(Type.String()),
         title: Type.Optional(Type.String({ maxLength: 160 })),
         requirements: Type.Optional(Type.String({ maxLength: 8000 })),
-        repos: Type.Optional(
-          Type.Array(Type.String(), { minItems: 1, maxItems: 12 }),
+        repos: Type.Optional(Type.Array(Type.String(), { maxItems: 12 })),
+        executionMode: Type.Optional(
+          Type.Union([Type.Literal("single"), Type.Literal("reviewed")]),
+        ),
+        executionReason: Type.Optional(
+          Type.String({ minLength: 1, maxLength: 400 }),
         ),
       }),
       async execute(_call, params, _signal, _update, ctx) {
@@ -608,6 +615,10 @@ export default function extension(pi: ExtensionAPI) {
         return result(
           await client.locked(async () => {
             if (params.action === "create") return createWork(client, params);
+            if (params.action === "complete")
+              return workStatus(client, params.id, true);
+            if (params.action === "promote")
+              return promoteWork(client, params.id, params.executionReason);
             if (params.action === "reopen_review")
               return reopenReview(client, params.id);
             if (params.action === "revise")
@@ -638,7 +649,7 @@ export default function extension(pi: ExtensionAPI) {
         id: Type.Optional(
           Type.String({
             description:
-              "Omit for Task Lead's own task; Orchestrator must supply project ID.",
+              "Omit for Task Lead's own task; Orchestrator supplies project ID for Oracle or a promoted direct task ID for Reviewer.",
           }),
         ),
         reason: Type.String({ minLength: 1, maxLength: 1200 }),
@@ -665,7 +676,7 @@ export default function extension(pi: ExtensionAPI) {
       name: "repo_project",
       label: "Overall work",
       description:
-        "Orchestrator-only overall requirements and completion gate. Create before tasks; explicitly declare progressDocuments (exact metadata paths containing status only). Requirements belong in versioned project/task contracts; AGENTS.md is never progress-only. Use repo_request_review with project ID after all Task Leads report approved completion; it validates readiness and dispatches Oracle. Complete requires a current Oracle PASS. Revise reopens overall requirements, invalidates its approval and preserves review budget. Status/list are compact; no source/diff.",
+        "Orchestrator-only overall requirements and completion gate. Create before tasks; explicitly declare progressDocuments (exact metadata paths containing status only). Requirements belong in versioned project/task contracts; AGENTS.md is never progress-only. Use repo_request_review with project ID after all Task Leads report approved completion; it validates readiness and dispatches Oracle. Complete requires Oracle PASS if any task is reviewed; all-single projects complete from current execution receipts without Oracle. Revise reopens overall requirements, invalidates its approval and preserves review budget. Status/list are compact; no source/diff.",
       parameters: Type.Object({
         action: Type.Union([
           Type.Literal("create"),

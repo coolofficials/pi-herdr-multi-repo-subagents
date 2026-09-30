@@ -107,6 +107,8 @@ async function controlled(t, opts = {}) {
         ...liveReady,
         cwd: launch.cwd,
         pane: launch.pane,
+        model: launch.modelSelection?.model,
+        thinking: launch.modelSelection?.thinking,
       });
       live.set(args[2], {
         name: args[2],
