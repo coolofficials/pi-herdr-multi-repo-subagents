@@ -49,6 +49,7 @@ export const CHILD_TOOLS = new Set([
   "repo_artifact",
   "repo_checkpoint",
   "repo_source",
+  "repo_image",
   "repo_research_fetch",
   "repo_reference_add",
   "repo_reference_list",
@@ -128,9 +129,9 @@ export function roleGuidance(role) {
     oracle:
       "Independently assess the whole project against its original/current requirements and the accepted task results. Inspect actual artifacts with repo_review_changes and repo_source, especially integration boundaries and missing acceptance evidence. Reuse valid task review evidence rather than repeat every local review. You are read-only: request concrete execution evidence through findings if needed. Submit PASS only when overall completion is supported; otherwise report actionable findings and affected tasks.",
     scout:
-      "Investigate local code and architecture without editing. Return facts, dependency/contract boundaries, constraints, alternatives, uncertainty and precise source references. Do not implement or reproduce large source excerpts.",
+      "Investigate local code, architecture and local visual references without editing. Use repo_image for an assigned image instead of the text-only repo_source. Return facts, dependency/contract boundaries, constraints, alternatives, uncertainty and precise source references. Do not implement or reproduce large source excerpts.",
     researcher:
-      "Research external documentation and dependency behavior without editing. Use HTTPS source retrieval or existing local references. State applicable versions, source URLs, limitations and uncertainty. If a source cannot be found or fetched, report the gap; never invent research. Use repo_reference_list before fetching again. Register reusable public documents or pinned dependency repositories with repo_reference_add; only that tool may write the reference store. Web search is optional: use registered web tools only when enabled, otherwise known URLs still work. Captured web output can be promoted by artifact ID but remains partial evidence. Reference IDs survive session replacement; never use temporary web response IDs as durable handoff.",
+      "Research external documentation and dependency behavior without editing. Use HTTPS source retrieval or existing local references. Read assigned local image references directly with repo_image; a separate Scout is not required just to read an image. State applicable versions, source URLs, limitations and uncertainty. If a source cannot be found or fetched, report the gap; never invent research. Use repo_reference_list before fetching again. Register reusable public documents or pinned dependency repositories with repo_reference_add; only that tool may write the reference store. Web search is optional: use registered web tools only when enabled, otherwise known URLs still work. Captured web output can be promoted by artifact ID but remains partial evidence. Reference IDs survive session replacement; never use temporary web response IDs as durable handoff.",
     implementer:
       "Implement the assigned acceptance criteria, using the supplied research and plan. Read actual code before modifying it. Preserve others' changes. Validate only the assigned scope and report evidence, skipped checks and remaining risks.",
     reviewer:

@@ -25,7 +25,7 @@ pi list
 
 명령이 없으면 나머지 확인을 계속하고 해당 구성요소만 설치합니다. 환경변수 전체나 인증 파일을 출력하지 않습니다. API key/bearer token을 출력하는 `pi auth` 하위 명령은 준비 상태 확인용으로 사용하지 않습니다.
 
-이 문서는 **v0.10.1 소스**를 기준으로 작성되었습니다. `package.json`의 버전이 있다고 같은 Git 태그나 npm 버전이 배포되어 있는 것은 아닙니다. 설치할 원격 ref의 존재와 내용을 먼저 확인합니다. 로컬 전용 기능을 이전 원격 설치본에서 사용할 수 있다고 설명하지 않습니다.
+이 문서는 **v0.10.2 소스**를 기준으로 작성되었습니다. `package.json`의 버전이 있다고 같은 Git 태그나 npm 버전이 배포되어 있는 것은 아닙니다. 설치할 원격 ref의 존재와 내용을 먼저 확인합니다. 로컬 전용 기능을 이전 원격 설치본에서 사용할 수 있다고 설명하지 않습니다.
 
 ## 2. 필수 환경 설치
 
@@ -281,3 +281,13 @@ v0.9.0 참조 자료 및 선택 웹 연결의 기존 근거는 타입·포맷 �
 실행 중 위험이 발견되면 Implementer의 `repo_execution`이 해당 job의 추가 실행·완료를 차단합니다. 기존 repo 작업은 `repo_work promote`로 baseline을 유지한 채 Reviewer를 붙일 수 있습니다. 완료한 구현·검증은 반복하지 않습니다. repo가 없는 루트 관리 작업은 코드 baseline이 없으므로, 코드 변경 전에 별도 범위가 있는 reviewed 작업을 만들어야 합니다.
 
 보드의 실행 모드·사유를 확인합니다. 설치했다고 난이도 판단 정확도나 비용 절감률이 입증된 것은 아닙니다. 테스트는 격리 fixture에서만 실행하고 사용자의 실제 세션을 재시작하지 않습니다.
+
+## 이미지 참고 자료 (v0.10.2)
+
+Scout·Researcher의 active job에는 `repo_image`가 제공됩니다. 이미지를 읽을 역할의 현재 모델이 image input을 지원하는지 확인합니다. `repo_agent_list/read`의 `capabilities.localImages`와 `capabilities.modelImageInput`을 구분합니다. 모델 metadata의 지원 여부는 실제 provider 동작 검증을 대체하지 않습니다.
+
+- root 기준 이미지: `scope: "task"`, `file: "references/screenshot.png"`. repo 내부는 해당 child 기준 상대 경로를 사용합니다.
+- 지원: PNG/JPEG/GIF/WebP/BMP, regular file 최대 8 MiB. scope 밖 경로·symlink·unassigned repo 접근을 우회하지 않습니다. SVG/PDF는 이 도구의 raster 입력이 아닙니다.
+- Pi resize로 글자가 작아질 수 있습니다. 보고에는 관찰 내용·판독 불가 부분·파일 경로를 남기고, 원본 이미지 대신 요약을 부모에게 전달합니다.
+- `repo_image`는 모델/설정을 자동 교체하지 않습니다. text-only 모델이면 역할만 바꾸어도 해결되지 않습니다. 부모가 사용자 제약 안에서 허용된 image-capable 역할 모델을 선택하거나 필요한 입력을 요청해야 합니다.
+- Orchestrator/Task Lead는 원본 이미지를 읽지 않고 Scout/Researcher에 위임합니다. Researcher는 자신이 처리할 수 있는 이미지 자료를 Scout에 재위임할 필요가 없습니다.

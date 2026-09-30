@@ -267,6 +267,36 @@ Scout (formerly Explorer) reads local code. Researcher (formerly Librarian) read
 
 Role permissions are selected at session/job boundaries and checked by tool hooks. A child has a fixed role and task/project for its lifetime. Implementation and review use **separate panes/conversations**. Reset refreshes the same role, not a role switch. No role bundles, multi-harness routing or automatic commits/publication are supplied.
 
+### Local image references (v0.10.2)
+
+Active Scout and Researcher jobs can use `repo_image` to inspect assigned local PNG,
+JPEG, GIF, WebP or BMP files. The existing `repo_source` remains text-only. For a
+task-root reference, use `{"scope":"task","file":"references/screenshot.png"}`;
+within the child checkout, omit `scope` and use a relative file path. Assigned
+repository boundaries still apply. Task metadata images outside repository trees
+are permitted; unrelated repositories, symlinks, hard links, VCS internals and
+dependency/build paths remain excluded. A file outside the task scope must first
+be supplied within that scope through authorized work; this tool does not import it.
+
+The tool checks the selected child's model for image input support and reads one
+stable regular file up to 8 MiB. It uses Pi's public image reader with resizing
+bounded to 2048 pixels per side and 4 MiB of encoded payload, or stricter provider
+limits. Resizing can reduce small-text legibility; animation/frame coverage is not
+guaranteed. SVG and PDF are not raster inputs for this tool. Failed processing is
+reported explicitly and does not constitute visual inspection. Image bytes stay in
+the child's conversation; managers receive compact observations, limitations and
+source paths. This does not add binary image snapshots to `repo_reference_add`.
+
+`repo_agent_list/read` expose `capabilities.localImages` (tool permission) and
+`capabilities.modelImageInput` (model metadata), with conservative unknown values
+for older sessions. A Researcher can read supplied images directly without another
+Scout round trip. If access, format or model capability prevents inspection, it
+reports the specific missing support to its immediate manager. The manager assesses
+an authorized alternative rather than blindly changing roles or declaring all
+agents incapable. Actual provider behavior and visual interpretation still need
+runtime confirmation. No model settings are automatically changed. Orchestrator
+and Task Lead cannot use this tool, and Scout/Researcher cannot spawn agents.
+
 ### Automatic execution routing (v0.10.0)
 
 Orchestrator chooses the execution path using the current request and known facts.
@@ -373,6 +403,7 @@ Changes to overall requirements, acceptance criteria or cross-task contracts mus
 | `repo_task_document`                              | Orchestrator: configured task-root metadata allowlist                                              |
 | `repo_task_note`, `repo_task_input`               | Lead: bounded decisions and direct-input receipts/classification                                   |
 | `repo_source`, `repo_research_fetch`              | Scoped child source/research access according to role                                              |
+| `repo_image`                                      | Active Scout/Researcher: assigned local images using an image-capable model                        |
 | `repo_review_changes`                             | Reviewer/Oracle: repository roster and paginated before/after content                              |
 | `repo_review_scope`                               | Reviewer: additional dependency files or conservative whole-repository scope                       |
 | `repo_agent_report`                               | Child: bounded result to immediate manager; Lead completion also enforces the approval gate        |

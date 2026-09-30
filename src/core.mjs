@@ -451,6 +451,10 @@ export class Controller {
             pane,
             jobId,
             managed: ready?.managed ?? false,
+            capabilities: ready?.capabilities ?? {
+              localImages: false,
+              modelImageInput: null,
+            },
             exited: ready?.exited ?? false,
             status:
               report?.status ??
@@ -1222,6 +1226,10 @@ export class Controller {
         ? "Herdr inspection failed; inspect the child pane."
         : undefined,
       managed: ready?.managed ?? false,
+      capabilities: ready?.capabilities ?? {
+        localImages: false,
+        modelImageInput: null,
+      },
       processStatus,
       parentConnection: parent?.status,
       role: record.role ?? "implementer",

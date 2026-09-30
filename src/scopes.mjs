@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { scopedPath } from "./access.mjs";
+import { IMAGE_EXTENSIONS } from "./images.mjs";
 
 export function assignedRepos(request, launch) {
   if (request?.contract?.review)
@@ -28,7 +29,10 @@ export async function scopedSourceBase(request, launch, params) {
   )
     return { base };
   // Metadata reads are allowed only outside repository trees and cannot walk other repos.
-  if (params.action === "read" && /\.(md|txt)$/.test(relative)) {
+  if (
+    (params.action === "read" && /\.(md|txt)$/.test(relative)) ||
+    (params.action === "image" && IMAGE_EXTENSIONS.test(relative))
+  ) {
     let current = path.dirname(path.join(base, relative));
     while (current !== base) {
       if (

@@ -1,4 +1,4 @@
-import { ROUTING_GUIDANCE } from "./routing.mjs";
+import { ROUTING_GUIDANCE, CAPABILITY_ROUTING_GUIDANCE } from "./routing.mjs";
 export function repositoryContext(snapshot) {
   if (!snapshot.repositories.length) return undefined;
   const roster = {
@@ -23,6 +23,7 @@ export function repositoryContext(snapshot) {
     "For reviewed execution, judge overall readiness only from Task Lead conversations and compact approved reports. Task Leads own implementation/refinement/review loops. Their completed reports require independent Reviewer approval of actual artifacts. Keep detail out of this context.",
     "For projects containing reviewed tasks, when all required Task Leads have delivered approved completion, call repo_request_review with the project ID and your readiness judgment; it checks candidacy and dispatches the separate Oracle. Oracle inspects actual integrated work against overall requirements. Route concrete findings to relevant leads via revised/reopened tasks. Only repo_project complete with a current Oracle PASS means overall completion.",
     "Use scout for local context and researcher for external sources only when planning needs it. Never spawn all roles automatically. Research is not an obligatory pipeline.",
+    CAPABILITY_ROUTING_GUIDANCE,
     "Open only the agents needed for the current user request. Merely discovering a repository is not a request to start work.",
     "Use the discovered roster below; repo_agent_list is optional for an explicit refresh or the full list. Existing agent IDs must still be checked by the tools before use.",
     "Call repo_work list when resuming to recover durable bundles. Missing/oversized reports require a focused request for repo_agent_report, never raw transcript retrieval.\nPass concise task context, preserve applicable AGENTS.md policies, and let automatic completion reports resume coordination. End the turn when only waiting.",
