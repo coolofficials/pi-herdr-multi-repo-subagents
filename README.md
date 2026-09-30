@@ -402,6 +402,36 @@ The generator refuses an existing project directory. It creates a metadata jj re
 
 `scripts/test-live.mjs` and `scripts/test-lifecycle-live.mjs` are historical v0.3/v0.4 harnesses, retained as references. Do not execute them against the current role contracts or ongoing work. The current entry point is `scripts/test-hierarchy-live.mjs`. Destructive lifecycle scenarios require a dedicated disposable fixture and test process identities; never target a user's working family.
 
+## Board lifecycle correction (v0.9.1)
+
+The board belongs to the main pane. A new main process in the same task root,
+Herdr socket and pane reuses a recorded board pane after its previous owner is
+confirmed dead and the pane is an idle shell. Board creation is serialized across
+runs; uncertain topology or an occupied previous board prevents another split.
+A board now exits when its owner releases coordination or is confirmed dead.
+Reports and sessions remain accessible through `/repo-agents history`.
+
+Older boards do not have the new owner-exit behavior. Press `q` in the old board
+before starting the replacement, then use `/repo-agents board` if initialization
+reported that the pane was occupied. Existing extra splits are not automatically
+closed. The extension does not commandeer unrelated processes or migrate child
+ownership between runs. Finished task tabs and the main board have separate
+lifecycles.
+
+Task tabs group a **task**, not a repository: one task can include several repos
+and its Lead/workers share the tab. Repo cwd belongs to the individual worker.
+Legacy `layout: "split"` directly splits the caller pane; use `layout: "tasks"`
+for task tabs. Existing families need to finish before a new process applies a
+layout/source update.
+
+Board launch now waits for a process readiness record instead of marking a pane
+open immediately. `board-error.json` records board initialization errors;
+`startup-error.json` in an agent directory records child launch/submission failures.
+Herdr JSON error codes/messages are retained in the reported error instead of
+only the command exit status. The exact reported user startup message has not
+been identified. v0.9.1 has static checks only; no new live Pi/Herdr scenario or
+automated tests have been run for this correction.
+
 ## v0.7: bounded context and task views
 
 The default layout is `tasks`: one tab per task, with the Lead and the workers it

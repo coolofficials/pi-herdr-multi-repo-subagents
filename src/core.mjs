@@ -257,8 +257,19 @@ export async function herdr(args, options = {}) {
     });
     return options.raw ? stdout : JSON.parse(stdout);
   } catch (e) {
+    let detail = "";
+    try {
+      const response = JSON.parse(e.stderr?.trim() ?? "");
+      const serverError = response.error ?? response;
+      detail = [serverError.code, serverError.message]
+        .filter((value) => typeof value === "string")
+        .join(": ")
+        .slice(0, 1600);
+    } catch {
+      /* Non-JSON transport output is not copied into agent context. */
+    }
     const error = new Error(
-      `Herdr ${args.slice(0, 2).join(" ")} failed: ${e.code ?? "transport error"}. Inspect the Herdr pane for details`,
+      `Herdr ${args.slice(0, 2).join(" ")} failed: ${detail || e.code || "transport error"}. Inspect the Herdr pane for details`,
     );
     error.cause = e;
     throw error;
@@ -1015,6 +1026,13 @@ export class Controller {
       } catch (e) {
         record.phase = "needs-attention";
         record.lastError = e.message;
+        await writeJSON(path.join(dir, "startup-error.json"), {
+          message: e.message,
+          pane,
+          agent: id,
+          role,
+          at: new Date().toISOString(),
+        });
         await writeJSON(this.indexFile, records);
         throw new Error(
           `${e.message}\nPane retained: ${pane}; agent: ${id}. Inspect with repo_agent_read; do not blindly start again.`,

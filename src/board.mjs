@@ -11,7 +11,7 @@ import { pathToFileURL } from "node:url";
 import { readJSON, writeJSON } from "./storage.mjs";
 import { familyRecords } from "./views.mjs";
 import { executionState } from "./execution.mjs";
-import { liveness } from "./lifecycle.mjs";
+import { processIdentity, liveness } from "./lifecycle.mjs";
 import { herdr, loadConfig } from "./core.mjs";
 
 export async function boardSnapshot(scope) {
@@ -110,6 +110,12 @@ export async function runBoard(scope) {
   process.stdin.setRawMode?.(true);
   process.stdin.resume();
   process.stdout.write("\x1b[?1049h\x1b[?25l");
+  await writeJSON(path.join(scope, "board-runtime.json"), {
+    instance: processIdentity(),
+    pane: process.env.HERDR_PANE_ID,
+    terminal: (await readJSON(path.join(scope, "board.json")))?.terminal,
+    startedAt: new Date().toISOString(),
+  });
   const exit = () => {
     if (done) return;
     done = true;
@@ -209,6 +215,12 @@ export async function runBoard(scope) {
     busy = true;
     try {
       snapshot = await boardSnapshot(scope);
+      if (
+        snapshot.parent &&
+        (snapshot.parent.status === "released" ||
+          liveness(snapshot.parent.instance) === "dead")
+      )
+        return exit();
       draw();
     } catch (e) {
       note = String(e);
@@ -282,5 +294,23 @@ export async function runBoard(scope) {
   process.stdout.on("resize", draw);
   await refresh();
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
-  await runBoard(path.resolve(process.argv[2]));
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  const scope = path.resolve(process.argv[2]);
+  try {
+    await runBoard(scope);
+  } catch (error) {
+    await writeJSON(path.join(scope, "board-error.json"), {
+      message: String(error),
+      at: new Date().toISOString(),
+      pane: process.env.HERDR_PANE_ID,
+    }).catch(() => {});
+    process.stderr.write(`Board initialization failed: ${String(error)}\n`);
+    process.stdin.setRawMode?.(false);
+    process.stdin.pause();
+    process.stdout.write("\x1b[?25h\x1b[?1049l");
+    process.exit(1);
+  }
+}

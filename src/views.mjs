@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { readJSON, writeJSON } from "./storage.mjs";
+import { withOperationLock } from "./coordination-lock.mjs";
 import { liveness } from "./lifecycle.mjs";
 import { executionState } from "./execution.mjs";
 const exec = promisify(execFile);
@@ -243,12 +244,82 @@ export async function maintainViews(client) {
       await writeJSON(file, { ...view, closed: true });
   }
 }
+async function previousBoard(client) {
+  const scopes = await fs.readdir(path.dirname(client.scope), {
+    withFileTypes: true,
+  });
+  const candidates = [];
+  for (const entry of scopes) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const scope = path.join(path.dirname(client.scope), entry.name);
+    if (scope === client.scope) continue;
+    const parent = await readJSON(path.join(scope, "parent.json"));
+    const board = await readJSON(path.join(scope, "board.json"));
+    if (
+      !board?.pane ||
+      parent?.root !== client.root ||
+      parent.pane !== client.env.HERDR_PANE_ID ||
+      parent.socket !== client.env.HERDR_SOCKET_PATH
+    )
+      continue;
+    candidates.push({ scope, parent, board });
+  }
+  candidates.sort((a, b) =>
+    (b.parent.updatedAt ?? "").localeCompare(a.parent.updatedAt ?? ""),
+  );
+  for (const candidate of candidates) {
+    const panes = (
+      await client.call([
+        "pane",
+        "list",
+        "--workspace",
+        client.env.HERDR_WORKSPACE_ID,
+      ])
+    ).result?.panes;
+    if (!Array.isArray(panes))
+      throw Error(
+        "Cannot confirm previous board topology; no new pane created.",
+      );
+    const pane = panes.find((p) => p.pane_id === candidate.board.pane);
+    if (!pane) continue;
+    if (liveness(candidate.parent.instance) !== "dead")
+      throw Error(
+        `Previous board ${pane.pane_id} belongs to a live or unknown owner. No duplicate board created.`,
+      );
+    if (!(await shellAvailable(client, candidate.board)))
+      throw Error(
+        `Previous board pane ${pane.pane_id} is still occupied. Press q in an old board, or inspect that pane before reopening the board. No duplicate pane created.`,
+      );
+    return candidate;
+  }
+}
 export async function ensureBoard(client, reopen = false) {
+  if (client.delegation) return;
+  // A board slot belongs to a root and main pane, not to each conversation/process.
+  return withOperationLock(
+    path.join(path.dirname(client.scope), ".board-lock"),
+    () => openBoard(client, reopen),
+    { identity: client.identity },
+  );
+}
+async function openBoard(client, reopen) {
   if (client.delegation) return;
   const file = path.join(client.scope, "board.json"),
     old = await readJSON(file);
   if (old && !reopen) return;
   let pane, identity;
+  if (!old) {
+    const prior = await previousBoard(client);
+    if (prior) {
+      pane = prior.board.pane;
+      identity = { tab: prior.board.tab, terminal: prior.board.terminal };
+      await writeJSON(path.join(prior.scope, "board.json"), {
+        ...prior.board,
+        status: "reassigned",
+        reassignedTo: client.scope,
+      });
+    }
+  }
   if (old && reopen) {
     const panes = (
       await client.call([
@@ -261,6 +332,10 @@ export async function ensureBoard(client, reopen = false) {
     if (!Array.isArray(panes)) throw Error("Cannot confirm board topology.");
     const existing = panes.find((p) => p.pane_id === old.pane);
     if (existing) {
+      if (existing.tab_id !== old.tab || existing.terminal_id !== old.terminal)
+        throw Error(
+          "Board pane identity changed; no replacement pane created.",
+        );
       if (!(await shellAvailable(client, old)))
         return {
           status: "retained",
@@ -301,6 +376,8 @@ export async function ensureBoard(client, reopen = false) {
     owner: client.identity.token,
   });
   const script = fileURLToPath(new URL("./board.mjs", import.meta.url));
+  await fs.rm(path.join(client.scope, "board-error.json"), { force: true });
+  await fs.rm(path.join(client.scope, "board-runtime.json"), { force: true });
   await client.call(
     [
       "pane",
@@ -311,6 +388,26 @@ export async function ensureBoard(client, reopen = false) {
     undefined,
     true,
   );
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const failure = await readJSON(path.join(client.scope, "board-error.json"));
+    if (failure)
+      throw Error(
+        `Board failed to initialize: ${failure.message}. See ${path.join(client.scope, "board-error.json")}; pane retained, no duplicate created.`,
+      );
+    const ready = await readJSON(path.join(client.scope, "board-runtime.json"));
+    if (
+      ready?.pane === pane &&
+      ready.terminal === identity.terminal &&
+      liveness(ready.instance) === "alive"
+    )
+      break;
+    if (Date.now() >= deadline)
+      throw Error(
+        `Board startup was not confirmed in pane ${pane}. Inspect it and use /repo-agents board after resolving the error; no automatic retry.`,
+      );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
   await writeJSON(file, {
     status: "open",
     pane,
