@@ -531,6 +531,14 @@ pane kept. Same-scope `repo_agent_start` reuses an idle live agent; a cleanly ex
 same-role pane can be reused after checking its identity. `/new`/reset refreshes a
 conversation without adding another pane.
 
+Scout/Researcher jobs do not wait for a task's code-review gate. A settled structured
+research report must first be queued to the immediate manager (or read by it); then
+the idle owned agent retires and its verified shell pane closes. Delivery is recorded
+for the specific job and parent, and does not mean the model has assessed the report.
+Missing reports, running jobs, unknown ownership and kept/detached panes are retained.
+Entering text in a finished research pane keeps it and shows its actual manager;
+it does not start an untracked model turn. Request further research through that manager.
+
 ### Contracts and progress
 
 On `repo_project create`, explicitly declare `progressDocuments`, e.g.

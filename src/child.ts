@@ -23,7 +23,7 @@ import {
 import { scopedSourceBase } from "./scopes.mjs";
 import { serialExecutor } from "./storage.mjs";
 import path from "node:path";
-import { childWorkState, setJobPhase } from "./execution.mjs";
+import { childWorkState, executionState, setJobPhase } from "./execution.mjs";
 import { randomUUID } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-coding-agent";
@@ -86,6 +86,12 @@ export default function childBridge(pi: ExtensionAPI) {
   let generation = 0;
   let configuredSession: string | undefined;
   let applyingModel = false;
+  const managerLabel = () =>
+    (launch?.parentRole ??
+      (launch?.ancestors?.length ? "task_lead" : "orchestrator")) ===
+    "task_lead"
+      ? "Task Lead"
+      : "Orchestrator";
   const stop = () => {
     generation++;
     if (timer) clearTimeout(timer);
@@ -439,7 +445,9 @@ export default function childBridge(pi: ExtensionAPI) {
     applyRole();
     event.systemPromptOptions.selectedTools = allowed();
     event.systemPromptOptions.sections.pi_repo_role =
-      roleGuidance(role) + singleGuidance(request?.contract);
+      roleGuidance(role) +
+      singleGuidance(request?.contract) +
+      `\nYour immediate manager is ${managerLabel()}. Reports and subsequent workflow decisions belong to this manager. Refer the user to this actual manager when continuing the work.`;
     if (role === "researcher")
       event.systemPromptOptions.sections.pi_repo_role += `\nOptional web bridge: ${webAccess ? "enabled" : "disabled"}; registered allowed tools: ${webTools().join(", ") || "none"}. Missing web tools do not prevent repo_reference_add for known URLs, repositories or local reference text. Web provider configuration belongs to pi-web-access. Use workflow=none for ordinary search, bounded retrieval, and approved providers; never send private task content to public search. Web clones/cache are temporary: register important sources in the durable store before handoff. Prefer a pinned repository reference to a temporary clone requiring unrestricted shell access.`;
     if (localReceipt)
@@ -1149,6 +1157,15 @@ export default function childBridge(pi: ExtensionAPI) {
         );
         return { action: "handled" };
       }
+      if (await readJSON(path.join(dir, "retired.json"))) {
+        parentGone = true;
+        ctx.ui.notify(
+          `This agent is retiring; its report and evidence are retained. Continue in ${managerLabel()}.`,
+          "info",
+        );
+        await maybeExit(ctx);
+        return { action: "handled" };
+      }
       if (detached) {
         if (event.text.startsWith(MARKER)) {
           ctx.ui.notify(
@@ -1190,6 +1207,19 @@ export default function childBridge(pi: ExtensionAPI) {
           keep: true,
           reason: "direct-user-input",
         });
+        if (["scout", "researcher"].includes(role) && !jobId) {
+          const state = await executionState({ dir });
+          if (state.report?.status === "settled" && state.report.brief) {
+            const delivery = await readJSON(
+              path.join(dir, `${state.request.jobId}.delivered.json`),
+            );
+            ctx.ui.notify(
+              `Research is finished; the report and evidence are retained${delivery?.parentToken === launch.parent.token ? " and the report was queued to your manager" : " for your manager to receive"}. Continue in ${managerLabel()}. Direct input keeps this pane; quit Pi to exit, or unpin it on the board for automatic cleanup.`,
+              "info",
+            );
+            return { action: "handled" };
+          }
+        }
         if (role === "task_lead") {
           if (event.text.length > 8000)
             throw new Error("Direct Task Lead input exceeds 8000 characters.");

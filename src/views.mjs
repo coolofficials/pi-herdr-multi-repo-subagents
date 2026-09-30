@@ -161,10 +161,17 @@ export async function shellAvailable(client, record) {
     return false;
   return true;
 }
-export async function maintainViews(client) {
-  if (client.delegation) return;
-  const records = await familyRecords(client.scope);
+export async function maintainViews(
+  client,
+  delivered = new Set(),
+  researchOnly = false,
+) {
+  const records = client.delegation
+    ? await client.records()
+    : await familyRecords(client.scope);
   for (const record of records) {
+    const research = ["scout", "researcher"].includes(record.role);
+    if (researchOnly && !research) continue;
     if (
       !record.tab ||
       !record.terminal ||
@@ -173,28 +180,73 @@ export async function maintainViews(client) {
     )
       continue;
     try {
-      const work =
-        record.bundle &&
-        (await readJSON(
-          path.join(
-            client.scope,
-            record.role === "oracle" ? "projects" : "work",
-            record.bundle + ".json",
-          ),
-        ));
-      if (work?.status !== "completed") continue;
-      const lead =
-        record.role === "oracle" ? record : (work.lead ?? work.executor);
-      if (!lead) continue;
-      const leadState = await executionState(lead);
-      if (leadState.pending || leadState.report?.brief?.outcome !== "completed")
-        continue;
+      const state = await executionState(record);
+      if (research) {
+        if (
+          state.pending ||
+          state.phase !== "settled" ||
+          state.report?.status !== "settled" ||
+          !["completed", "incomplete", "blocked"].includes(
+            state.report.brief?.outcome,
+          ) ||
+          state.report.jobId !== state.request?.jobId
+        )
+          continue;
+        const launch = await readJSON(path.join(record.dir, "launch.json"));
+        const receiptFile = path.join(
+          record.dir,
+          `${state.request.jobId}.delivered.json`,
+        );
+        let receipt = await readJSON(receiptFile);
+        if (
+          record.owner === client.owner &&
+          launch?.scope === client.scope &&
+          launch.parent?.token === client.identity?.token &&
+          delivered.has(`${state.request.jobId}:report`) &&
+          (receipt?.jobId !== state.request.jobId ||
+            receipt.parentToken !== client.identity.token ||
+            receipt.scope !== client.scope)
+        ) {
+          receipt = {
+            jobId: state.request.jobId,
+            parentToken: client.identity.token,
+            scope: client.scope,
+          };
+          await writeJSON(receiptFile, receipt);
+        }
+        if (
+          !launch?.parent?.token ||
+          receipt?.jobId !== state.request.jobId ||
+          receipt.parentToken !== launch.parent.token ||
+          receipt.scope !== launch.scope
+        )
+          continue;
+      } else {
+        const work =
+          record.bundle &&
+          (await readJSON(
+            path.join(
+              client.scope,
+              record.role === "oracle" ? "projects" : "work",
+              record.bundle + ".json",
+            ),
+          ));
+        if (work?.status !== "completed") continue;
+        const lead =
+          record.role === "oracle" ? record : (work.lead ?? work.executor);
+        if (!lead) continue;
+        const leadState = await executionState(lead);
+        if (
+          leadState.pending ||
+          leadState.report?.brief?.outcome !== "completed"
+        )
+          continue;
+      }
       if (
         (await readJSON(path.join(record.dir, "keep.json")))?.keep ||
         (await readJSON(path.join(record.dir, "detached.json")))
       )
         continue;
-      const state = await executionState(record);
       if (state.pending || !state.ready || state.phase === "interrupted")
         continue;
       if (liveness(state.ready.instance) === "alive") {
@@ -206,7 +258,7 @@ export async function maintainViews(client) {
         )
           continue;
         await writeJSON(path.join(record.dir, "retired.json"), {
-          reason: "task-approved",
+          reason: research ? "research-delivered" : "task-approved",
           at: new Date().toISOString(),
         });
         continue;
@@ -226,6 +278,7 @@ export async function maintainViews(client) {
       /* Unknown topology/process state is retained; never force close. */
     }
   }
+  if (client.delegation) return;
   const views = await fs
     .readdir(path.join(client.scope, "views"))
     .catch(() => []);

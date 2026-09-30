@@ -111,14 +111,18 @@ export default function extension(pi: ExtensionAPI) {
       const client = controller(ctx);
       if (child.state().parentGone) return;
       client.lifecycle?.assertOwned();
+      try {
+        const researchOnly =
+          Boolean(client.delegation) ||
+          (await loadConfig(client.root)).layout === "split";
+        await client.locked(
+          () => maintainViews(client, delivered, researchOnly),
+          { timeoutMs: 0 },
+        );
+      } catch (error) {
+        if (!(error instanceof CoordinationBusy)) throw error;
+      }
       if (!client.delegation) {
-        if ((await loadConfig(client.root)).layout !== "split") {
-          try {
-            await client.locked(() => maintainViews(client), { timeoutMs: 0 });
-          } catch (error) {
-            if (!(error instanceof CoordinationBusy)) throw error;
-          }
-        }
         const requests = (
           await fs
             .readdir(path.join(client.scope, "board-requests"))

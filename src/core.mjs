@@ -1064,6 +1064,10 @@ export class Controller {
   ) {
     validateWork(task, context);
     this.lifecycle.assertOwned();
+    if (await readJSON(path.join(record.dir, "retired.json")))
+      throw Error(
+        "Agent is retiring. Its report is retained; wait for confirmed exit, then start a new agent for follow-up work.",
+      );
     const ready = await readJSON(path.join(record.dir, "ready.json"));
     if (!ready?.managed)
       throw new Error(
