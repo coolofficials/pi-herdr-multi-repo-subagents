@@ -589,6 +589,23 @@ review budget for approval-only recovery. Use `revise` for changed requirements.
 Repeated review requests with unchanged semantic requirements and artifact
 candidates are bounded independently of session/job IDs.
 
+### Pane startup readiness
+
+Before starting a child, the extension observes the created pane for up to ten
+seconds. Its pane, terminal and tab identities must match the creation response,
+and the shell must remain the only foreground process across observations spanning
+at least 500 ms. Missing process data or a foreground initialization command resets
+that stability window; an agent occupant, restore error or identity change stops
+the launch. This preflight does not prove that the interactive prompt is ready:
+Herdr still performs its final availability check when `agent start` is called.
+
+Only one agent start is submitted. A timeout, cancellation or API error retains
+the pane and launch record for inspection/recovery; it does not send terminal
+input, kill a process or retry a possibly delivered start. `shell-ready.json`
+records the successful observation, while `startup-error.json` records the failed
+stage (`waiting-shell`, `starting`, or a later stage). Existing running sessions
+are not restarted or automatically recovered.
+
 ### Evidence and context
 
 Large native Implementer tool results are replaced by bounded head/tail excerpts.

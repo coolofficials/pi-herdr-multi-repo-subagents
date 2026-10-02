@@ -8,6 +8,7 @@ import {
 } from "./model-settings.mjs";
 import { withOperationLock } from "./coordination-lock.mjs";
 import { createTaskPane, shellAvailable } from "./views.mjs";
+import { waitForLaunchShell } from "./launch-readiness.mjs";
 import { scopedInstructions } from "./scopes.mjs";
 import fs from "node:fs/promises";
 import { readJSON, writeJSON } from "./storage.mjs";
@@ -959,12 +960,10 @@ export class Controller {
         record.tab = reused.tab;
         record.terminal = reused.terminal;
       }
-      if (record.tab) {
-        const current = (await this.call(["pane", "get", pane], signal)).result
-          ?.pane;
-        record.terminal = current?.terminal_id;
-      }
-      record.phase = "starting";
+      const createdPane = split.result?.pane ?? split.result?.root_pane;
+      record.tab ??= createdPane?.tab_id;
+      record.terminal ??= createdPane?.terminal_id;
+      record.phase = "waiting-shell";
       await writeJSON(this.indexFile, records);
       await writeJSON(path.join(dir, "launch.json"), {
         token: launchToken,
@@ -1011,6 +1010,14 @@ export class Controller {
       if (selection.model) args.push("--model", selection.model);
       if (selection.thinking) args.push("--thinking", selection.thinking);
       try {
+        const readiness = await waitForLaunchShell(this, record, signal);
+        await writeJSON(path.join(dir, "shell-ready.json"), {
+          ...readiness,
+          at: new Date().toISOString(),
+        });
+        record.phase = "starting";
+        await writeJSON(this.indexFile, records);
+        signal?.throwIfAborted();
         await this.call(args, signal, false, 35000);
         const deadline = Date.now() + 5000;
         while (!(await readJSON(path.join(dir, "ready.json")))) {
@@ -1042,10 +1049,12 @@ export class Controller {
           bundle,
         });
       } catch (e) {
+        const stage = record.phase;
         record.phase = "needs-attention";
         record.lastError = e.message;
         await writeJSON(path.join(dir, "startup-error.json"), {
           message: e.message,
+          stage,
           pane,
           agent: id,
           role,
