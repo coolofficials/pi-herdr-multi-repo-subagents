@@ -599,6 +599,21 @@ Implementer's authorized check in its assigned checkout, records exit status and
 up to 8 MiB of output, and reports truncation explicitly. Checks are never
 implicitly rerun or cached across changes to unknown external/environment inputs.
 
+Reviewer/Oracle can call `repo_artifact` with just `id`: ownership is resolved
+within their assigned task members (Oracle uses its assigned task approval set).
+Other roles retain own-agent access only. An explicit `agent` restricts lookup to
+that owner; it never falls back to another agent. Multiple matching owners return
+candidate metadata instead of log content; retry with `agent` to choose.
+No other runs or unassigned tasks are searched, including after a worker exits.
+
+New captured outputs carry owner/task provenance. Reads include the original
+job ID, owner and task; older artifacts still resolve through assigned task
+membership. Query misses retain that provenance. This does **not** establish
+code-version freshness: `sourceVersion: null` explicitly means no source version
+was captured, and the log hash identifies output, not code. Compare execution
+timing and subsequent changes before relying on a result. Existing review
+fingerprint, complete-file coverage and approval gates remain unchanged.
+
 Review diff pages retain their existing complete-file coverage requirements.
 Root Reviewers/Oracles must address sources with assigned task-relative paths
 (e.g. `repos/api/file.ts`); choosing `scope: "repo"` at the task root does not

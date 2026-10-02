@@ -8,6 +8,7 @@ export async function runCheck(
   cwd,
   { command, timeout = 120 },
   signal,
+  provenance,
 ) {
   if (
     typeof command !== "string" ||
@@ -26,6 +27,7 @@ export async function runCheck(
   await writeJSON(path.join(dir, "checks", id + ".intent.json"), {
     id,
     jobId,
+    provenance,
     cwd,
     command,
     createdAt,
@@ -79,6 +81,7 @@ export async function runCheck(
     id,
     jobId,
     tool: "repo_check",
+    provenance,
     command,
     cwd,
     createdAt,
@@ -102,6 +105,7 @@ export async function runCheck(
     id,
     jobId,
     exitCode: record.exitCode,
+    provenance,
     reason,
     complete: record.complete,
     isError: record.isError,

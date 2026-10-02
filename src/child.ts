@@ -17,9 +17,9 @@ import { runCheck } from "./checks.mjs";
 import fs from "node:fs/promises";
 import {
   retainOutput,
-  readArtifact,
+  readScopedArtifact,
   recordUsage,
-  evidenceDirectory,
+  evidenceProvenance,
 } from "./artifacts.mjs";
 import { scopedSourceBase } from "./scopes.mjs";
 import { serialExecutor } from "./storage.mjs";
@@ -540,6 +540,7 @@ export default function childBridge(pi: ExtensionAPI) {
       {
         isError: event.isError,
         always: role === "researcher",
+        provenance: evidenceProvenance(launch, request),
       },
     );
     if (retained && role === "researcher") {
@@ -601,7 +602,14 @@ export default function childBridge(pi: ExtensionAPI) {
         activeRequest();
         if (role !== "implementer")
           throw Error("Only Implementer may execute checks.");
-        const value = await runCheck(dir!, jobId!, launch.cwd, params, signal);
+        const value = await runCheck(
+          dir!,
+          jobId!,
+          launch.cwd,
+          params,
+          signal,
+          evidenceProvenance(launch, request),
+        );
         return {
           ...result({ ...value, agent: launch.agentId }),
           isError: value.isError,
@@ -614,13 +622,13 @@ export default function childBridge(pi: ExtensionAPI) {
       name: "repo_artifact",
       label: "Read retained evidence",
       description:
-        "Inspect retained tool output by artifact ID (Reviewer/Oracle may name the source agent within assigned review tasks), offset/limit, or literal query. Excerpts never establish full review coverage. Raw output may already have been truncated by the original tool; check completeness.",
+        "Inspect retained tool output by artifact ID, offset/limit, or literal query. Reviewer/Oracle automatically resolve an omitted owner within assigned review tasks; supply agent to disambiguate. Returns owner and original job provenance. Excerpts never establish full review coverage. Check completeness and whether the evidence applies to the current code; finding a log does not validate its freshness.",
       parameters: Type.Object({
         id: Type.String(),
         agent: Type.Optional(
           Type.String({
             description:
-              "Reviewer/Oracle: evidence owner agent ID within assigned task(s); omit for own artifacts.",
+              "Optional evidence owner agent ID. Reviewer/Oracle may omit to search own and assigned task members' artifacts. Specify when multiple owners match; other roles can only read their own artifacts.",
           }),
         ),
         offset: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -629,13 +637,7 @@ export default function childBridge(pi: ExtensionAPI) {
       }),
       async execute(_call, params) {
         requireScope();
-        const evidenceDir = await evidenceDirectory(
-          launch,
-          request,
-          dir!,
-          params.agent,
-        );
-        return result(await readArtifact(evidenceDir, params.id, params));
+        return result(await readScopedArtifact(launch, request, dir!, params));
       },
     }),
   );

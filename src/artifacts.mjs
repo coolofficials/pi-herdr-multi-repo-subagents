@@ -7,7 +7,12 @@ export async function retainOutput(
   jobId,
   tool,
   content,
-  { isError = false, limit = 8192, always = false } = {},
+  {
+    isError = false,
+    limit = 8192,
+    always = false,
+    provenance = /** @type {any} */ (undefined),
+  } = {},
 ) {
   const text = content
     .filter((c) => c.type === "text")
@@ -20,6 +25,7 @@ export async function retainOutput(
     id,
     jobId,
     tool,
+    provenance,
     isError,
     text,
     chars: text.length,
@@ -42,6 +48,7 @@ export async function retainOutput(
       artifact: id,
       jobId,
       tool,
+      provenance,
       isError,
       chars: text.length,
       excerpt: true,
@@ -56,6 +63,10 @@ export async function readArtifact(
   if (!/^[a-f0-9-]{36}$/.test(id)) throw Error("Invalid artifact ID.");
   const value = await readJSON(path.join(dir, "artifacts", id + ".json"));
   if (!value) throw Error("Artifact is outside this agent ownership scope.");
+  return artifactPage(value, id, { offset, limit, query });
+}
+
+function artifactPage(value, id, { offset = 0, limit = 8000, query } = {}) {
   if (
     !Number.isInteger(offset) ||
     offset < 0 ||
@@ -67,13 +78,20 @@ export async function readArtifact(
   if (query) {
     if (query.length > 200) throw Error("Narrow the search.");
     const found = value.text.indexOf(query, offset);
-    if (found < 0) return { id, found: false };
+    if (found < 0)
+      return {
+        id,
+        jobId: value.jobId,
+        provenance: value.provenance,
+        found: false,
+      };
     offset = Math.max(0, found - 500);
   }
   return {
     id,
     tool: value.tool,
     jobId: value.jobId,
+    provenance: value.provenance,
     command: value.command,
     cwd: value.cwd,
     exitCode: value.exitCode,
@@ -102,8 +120,18 @@ export async function recordUsage(dir, message, contextWindow = 272000) {
   return value;
 }
 
-export async function evidenceDirectory(launch, request, ownDir, agent) {
-  if (!agent || agent === launch.agentId) return ownDir;
+export function evidenceProvenance(launch, request) {
+  return {
+    agent: launch.agentId,
+    task: request?.bundle ?? null,
+    workScope: request?.contract?.workScope ?? null,
+    cwd: launch.cwd,
+    // A log hash identifies output, not the source version that produced it.
+    sourceVersion: null,
+  };
+}
+
+async function reviewEvidenceOwners(request) {
   if (
     !["reviewer", "oracle"].includes(request?.role) ||
     !request.contract?.review
@@ -117,10 +145,89 @@ export async function evidenceDirectory(launch, request, ownDir, agent) {
     review.kind === "projects"
       ? (review.taskApprovals ?? []).map((t) => t.id)
       : [review.id];
-  for (const id of ids) {
+  const owners = [];
+  for (const id of new Set(ids)) {
     const work = await readJSON(path.join(scope, "work", id + ".json"));
-    const member = work?.members?.find((m) => m.id === agent);
-    if (member) return member.dir;
+    for (const member of work?.members ?? [])
+      owners.push({
+        agent: member.id,
+        dir: member.dir,
+        task: id,
+        workScope: scope,
+        repo: member.repo,
+      });
   }
+  return owners;
+}
+
+export async function evidenceDirectory(launch, request, ownDir, agent) {
+  if (!agent || agent === launch.agentId) return ownDir;
+  const member = (await reviewEvidenceOwners(request)).find(
+    (owner) => owner.agent === agent,
+  );
+  if (member) return member.dir;
   throw Error("Evidence owner is outside assigned review tasks.");
+}
+
+export async function readScopedArtifact(launch, request, ownDir, params) {
+  const { id, agent } = params;
+  if (!/^[a-f0-9-]{36}$/.test(id)) throw Error("Invalid artifact ID.");
+  const own = { agent: launch.agentId, dir: ownDir };
+  const review =
+    ["reviewer", "oracle"].includes(request?.role) && request.contract?.review;
+  // Resolve only registered members of the assigned review, never other runs.
+  let owners = [own];
+  if (review && agent !== launch.agentId)
+    owners.push(...(await reviewEvidenceOwners(request)));
+  if (agent) {
+    owners = owners.filter((owner) => owner.agent === agent);
+    if (!owners.length)
+      throw Error("Evidence owner is outside assigned review tasks.");
+  }
+  const matches = new Map();
+  for (const owner of owners) {
+    const value = await readJSON(
+      path.join(owner.dir, "artifacts", id + ".json"),
+    );
+    if (!value) continue;
+    const provenance = value.provenance;
+    if (
+      provenance &&
+      (provenance.agent !== owner.agent ||
+        (owner.task &&
+          (provenance.task !== owner.task ||
+            provenance.workScope !== owner.workScope)))
+    )
+      throw Error(
+        "Artifact provenance does not match its assigned owner/task.",
+      );
+    const key = path.resolve(owner.dir);
+    const prior = matches.get(key);
+    if (!prior || owner.task) matches.set(key, { ...owner, value });
+  }
+  if (!matches.size)
+    throw Error(
+      "Artifact was not found within this agent or its assigned review tasks.",
+    );
+  if (matches.size > 1)
+    return {
+      id,
+      status: "ambiguous",
+      candidateCount: matches.size,
+      candidates: [...matches.values()]
+        .slice(0, 20)
+        .map(({ agent, task, repo }) => ({ agent, task, repo })),
+      instruction:
+        "Retry with the source agent ID from the evidence report. No log was selected.",
+    };
+  const owner = [...matches.values()][0];
+  return {
+    ...artifactPage(owner.value, id, params),
+    agent: owner.agent,
+    task: owner.task ?? request?.bundle ?? null,
+    repo: owner.repo,
+    sourceVersion: null,
+    evidenceNote:
+      "Source version was not recorded. The job ID and timestamps identify this execution; the log hash is not a code fingerprint. Do not infer that this check verifies the current review target or reuse it automatically.",
+  };
 }
