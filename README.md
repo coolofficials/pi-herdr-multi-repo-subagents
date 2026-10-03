@@ -715,3 +715,9 @@ repair, progress-note approval reuse and registered verification evidence. Run
 only inside a dedicated test Herdr server/profile. Unit tests cover the failure
 and stale-target paths. Small-fixture success does not establish general cost
 savings, engineering quality or immunity to model/provider failures.
+
+The package entry defers to an explicitly loaded managed child bridge from this
+package. Updating the profile therefore does not load two bridge versions in an
+old parent's newly launched child. Existing families keep their explicit bridge;
+new main processes use the selected package version. This is version isolation,
+not automatic migration of prior state or restarted user sessions.

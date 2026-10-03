@@ -535,3 +535,31 @@ test("progress handoff after committed task completion preserves approval and ta
     /reopen/,
   );
 });
+test("package entry defers only to an explicitly pinned managed child bridge", async (t) => {
+  const { usesExplicitChildBridge } = await import("../src/entry.mjs");
+  const f = await fixture(t);
+  await fs.mkdir(path.join(f.root, "pkg/src"), { recursive: true });
+  await writeJSON(path.join(f.root, "pkg/package.json"), {
+    name: "pi-herdr-multi-repo-subagents",
+  });
+  const entry = path.join(f.root, "pkg/src/index.ts");
+  assert.equal(
+    await usesExplicitChildBridge([
+      "--repo-agent-child",
+      "launch",
+      "--extension",
+      entry,
+    ]),
+    true,
+  );
+  assert.equal(await usesExplicitChildBridge(["--extension", entry]), false);
+  assert.equal(
+    await usesExplicitChildBridge([
+      "--repo-agent-child",
+      "launch",
+      "--extension",
+      path.join(f.root, "other/src/index.ts"),
+    ]),
+    false,
+  );
+});

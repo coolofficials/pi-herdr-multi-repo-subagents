@@ -316,3 +316,5 @@ Reviewer/Oracle은 `repo_artifact`에 `id`만 전달해도 할당된 작업의 �
 - Task Lead의 조회 요청만 완료했다면 `repo_agent_report completion=job`를 사용합니다. 전체 task 완료에는 기존 승인 조건이 그대로 필요합니다.
 - `repo_coordination`은 다음 행동과 실제 대기 이유를 저장합니다. `waiting_user`에는 최종 응답에서 물은 실제 질문이 필요하고 `waiting_children`은 진행 중 자식이 있어야 합니다. 완료 승인이나 추가 사용자 권한을 생성하지 않습니다.
 - 사용자 진행 세션에는 reload/재시작을 강제하지 않습니다. 이전 snapshot을 유지하고 package source를 새 버전으로 변경한 후 새 메인 Pi에서 사용하는 것이 일관된 적용 방법입니다. 기존 세션의 결과 파일을 수동 수정해 승인하지 않습니다. 오래된 제출에는 새 draft가 없을 수 있어 자동 복구를 보장하지 않습니다.
+
+- package entry는 managed child의 명시적 이 패키지 bridge에 위임하여, profile을 갱신한 뒤 구 메인이 자식을 열어도 두 버전의 hook/tool을 함께 등록하지 않습니다. 기존 가족은 자신이 명시한 bridge로 계속 동작하며 새 메인에서 새 설치본을 사용합니다. 자식/부모를 새 버전으로 자동 이동하거나 기존 상태를 승인하지 않습니다.
