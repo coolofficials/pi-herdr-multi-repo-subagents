@@ -1,10 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-// Managed launches explicitly pin their bridge. Global package discovery must
+// Explicit launches pin their bridge. Global package discovery must
 // not register a second bridge after the profile is upgraded mid-family.
-export async function usesExplicitChildBridge(argv) {
-  if (!argv.includes("--repo-agent-child")) return false;
+export async function usesExplicitBridge(argv) {
   for (let i = 0; i < argv.length - 1; i++) {
     if (!["--extension", "-e"].includes(argv[i])) continue;
     const file = argv[i + 1];

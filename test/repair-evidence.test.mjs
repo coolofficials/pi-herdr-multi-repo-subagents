@@ -535,8 +535,8 @@ test("progress handoff after committed task completion preserves approval and ta
     /reopen/,
   );
 });
-test("package entry defers only to an explicitly pinned managed child bridge", async (t) => {
-  const { usesExplicitChildBridge } = await import("../src/entry.mjs");
+test("package entry defers only to an explicitly pinned package bridge", async (t) => {
+  const { usesExplicitBridge } = await import("../src/entry.mjs");
   const f = await fixture(t);
   await fs.mkdir(path.join(f.root, "pkg/src"), { recursive: true });
   await writeJSON(path.join(f.root, "pkg/package.json"), {
@@ -544,7 +544,7 @@ test("package entry defers only to an explicitly pinned managed child bridge", a
   });
   const entry = path.join(f.root, "pkg/src/index.ts");
   assert.equal(
-    await usesExplicitChildBridge([
+    await usesExplicitBridge([
       "--repo-agent-child",
       "launch",
       "--extension",
@@ -552,9 +552,10 @@ test("package entry defers only to an explicitly pinned managed child bridge", a
     ]),
     true,
   );
-  assert.equal(await usesExplicitChildBridge(["--extension", entry]), false);
+  assert.equal(await usesExplicitBridge(["--extension", entry]), true);
+  assert.equal(await usesExplicitBridge([]), false);
   assert.equal(
-    await usesExplicitChildBridge([
+    await usesExplicitBridge([
       "--repo-agent-child",
       "launch",
       "--extension",
