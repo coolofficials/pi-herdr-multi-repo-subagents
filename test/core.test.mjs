@@ -98,7 +98,15 @@ async function controlled(t, opts = {}) {
         },
       };
     if (args[1] === "split") {
-      return { result: { pane: { pane_id: `w1:p${++n + 1}` } } };
+      return {
+        result: {
+          pane: {
+            pane_id: `w1:p${++n + 1}`,
+            terminal_id: "term",
+            tab_id: "tab",
+          },
+        },
+      };
     }
     if (args[1] === "start") {
       const { dir } = JSON.parse(args[args.indexOf("--repo-agent-child") + 1]);
@@ -117,6 +125,23 @@ async function controlled(t, opts = {}) {
       });
       return { result: { agent: live.get(args[2]) } };
     }
+    if (args[0] === "pane" && args[1] === "get")
+      return {
+        result: {
+          pane: { pane_id: args[2], terminal_id: "term", tab_id: "tab" },
+        },
+      };
+    if (args[1] === "process-info")
+      return {
+        result: {
+          process_info: {
+            pane_id: args[args.indexOf("--pane") + 1],
+            shell_pid: 123,
+            foreground_process_group_id: 123,
+            foreground_processes: [{ pid: 123 }],
+          },
+        },
+      };
     if (args[1] === "get") {
       if (!live.has(args[2])) throw new Error("not found");
       return { result: { agent: live.get(args[2]) } };
@@ -275,7 +300,15 @@ test("explicit tabs preserve independent starts and distinct job identities", as
   controller.transport = async (args, opts) => {
     if (args[0] === "tab" && args[1] === "create") {
       calls.push(args);
-      return { result: { root_pane: { pane_id: `w1:p${calls.length + 10}` } } };
+      return {
+        result: {
+          root_pane: {
+            pane_id: `w1:p${calls.length + 10}`,
+            terminal_id: "term",
+            tab_id: "tab",
+          },
+        },
+      };
     }
     return transport(args, opts);
   };
@@ -471,4 +504,27 @@ test("recovery retry repairs cleanup after registry removal and preserves interr
     "interrupted",
   );
   assert.equal((await controller.recover(first.id)).status, "recovered");
+});
+
+test("a retired worker follow-up returns explicit non-submission guidance", async (t) => {
+  const { controller } = await controlled(t);
+  const started = await controller.start({
+    role: "scout",
+    repo: "repos/api",
+    task: "Inspect",
+  });
+  const record = await controller.record(started.id);
+  await writeJSON(path.join(record.dir, `${started.jobId}.result.json`), {
+    status: "settled",
+  });
+  await writeJSON(path.join(record.dir, "retired.json"), {
+    reason: "completed",
+  });
+  const response = await controller.prompt({
+    id: started.id,
+    task: "Follow-up",
+  });
+  assert.equal(response.submitted, false);
+  assert.equal(response.status, "retiring");
+  assert.match(response.nextAction, /confirmed exit/);
 });

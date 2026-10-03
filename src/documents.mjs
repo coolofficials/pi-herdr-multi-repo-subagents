@@ -50,10 +50,18 @@ export async function registerProgress(root, scope, project, files = []) {
         throw Error("Repository documents cannot be progress-only.");
       parent = path.dirname(parent);
     }
-    if (state[file] && state[file].project !== project)
-      throw Error("Progress document already belongs to another project.");
+    if (state[file]) {
+      state[file].projects = [
+        ...new Set([
+          ...(state[file].projects ?? [state[file].project]),
+          project,
+        ]),
+      ];
+      continue; // Registering another project must not acknowledge external edits.
+    }
     state[file] = {
       project,
+      projects: [project],
       hash: hash(await content(root, file)),
       revision: 1,
       pending: false,

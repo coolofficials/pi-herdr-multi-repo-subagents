@@ -1,3 +1,4 @@
+import { readJSON } from "./storage.mjs";
 import path from "node:path";
 import { executionState } from "./execution.mjs";
 import { getWork, getProject, listWork } from "./hierarchy.mjs";
@@ -77,6 +78,7 @@ export function describe({
   tasks,
   parent,
   executionMode,
+  coordination = [],
 }) {
   const waiting = children.filter((c) => c.pending && !c.issue);
   const attention = children.filter((c) => c.issue);
@@ -96,6 +98,16 @@ export function describe({
   else if (idle && own?.phase === "settled") state = "reported";
   if (own && ["needs_report", "interrupted", "recovered"].includes(own.phase))
     state = own.phase.replaceAll("_", " ");
+  if (idle && !waiting.length && coordination.length) {
+    const blocked = coordination.filter(
+      (s) => s.status === "blocked_system",
+    ).length;
+    const questions = coordination.filter(
+      (s) => s.status === "waiting_user",
+    ).length;
+    if (blocked || questions)
+      state = `${blocked} blocked · ${questions} awaiting user`;
+  }
   if (attention.length) state += ` · ${attention.length} need attention`;
   const identity = roleTitle(role);
   const scope =
@@ -109,6 +121,10 @@ export function describe({
   if (executionMode)
     lines.push(
       `Execution: ${executionMode === "single" ? "Single · no independent review" : "Reviewed"}`,
+    );
+  for (const item of coordination.slice(0, 2))
+    lines.push(
+      `  ${short(item.title ?? item.id, 36)} | ${clean(item.status).replaceAll("_", " ")} | ${short(item.reason ?? item.nextAction, 70)}`,
     );
   const visible = [...attention, ...waiting];
   for (const child of visible.slice(0, 3)) {
@@ -150,6 +166,13 @@ export function publish(pi, ctx, view) {
 }
 async function coordinatorView(pi, ctx, client) {
   const tasks = await listWork(client.workScope);
+  const saved = await readJSON(
+    path.join(client.scope, "coordination-state.json"),
+    {},
+  );
+  const coordination = tasks
+    .filter((t) => t.status !== "completed" && saved[t.id])
+    .map((t) => ({ ...saved[t.id], title: t.title }));
   const children = await childRows(
     (await client.records()).filter((r) => r.owner === client.owner),
     client.workScope,
@@ -160,6 +183,7 @@ async function coordinatorView(pi, ctx, client) {
     describe({
       role: "orchestrator",
       title: path.basename(client.root),
+      coordination,
       idle: ctx.isIdle(),
       children,
       tasks: {

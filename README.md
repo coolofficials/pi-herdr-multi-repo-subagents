@@ -652,3 +652,66 @@ and the next action. Context-pressure indicators start at 48k/64k input tokens o
 25%/35% of a smaller model's context window. Cumulative cache-read volume alone
 never forces a rotation. These controls reduce avoidable input; they do not
 guarantee cost reduction or that a model's summary preserves every relevant fact.
+
+## Report acceptance and coordination (v0.10.5)
+
+A review decision and an accepted approval are separate. `repo_agent_report`
+retains a draft before checking progress classification, current contracts,
+inspection coverage and the exact artifact target. A failed draft never grants
+approval. Once the blocker is resolved, the owning manager can call
+`repo_agent_repair {id}`; `repo_request_review` also attempts this repair when the
+existing review has a saved missing-report result. Repair revalidates the same
+job and review attempt, without spawning a pane, prompting a model or spending
+another review slot. Changed targets/contracts remain rejected. Further child
+tool use invalidates the final draft. Missing legacy drafts cannot be invented;
+implementation completion is not automatically accepted by this repair path.
+
+Task Leads use `repo_task_note kind=decision` (default) for work-affecting choices
+and refinements, which invalidate approval. `kind=progress` stores status and
+handoff facts separately and preserves approval. Progress notes never change
+acceptance criteria. Multiple projects can share a declared progress document;
+registration preserves its prior hash and cannot silently acknowledge external
+edits. Orchestrator must read and reconcile external edits explicitly.
+
+Lead reports default to `completion=task`, requiring current Reviewer approval.
+A Lead may use `completion=job` for a finished diagnostic or bounded request
+without marking the task complete. Other roles report their individual jobs;
+Reviewer/Oracle PASS still requires the full review gate. Compact public reports
+include this distinction and a bounded failure cause/next action for provider
+limits, connection failures and report-validation blockers.
+
+`repo_review_changes coverage=true` shows recorded baseline coverage, missing
+files and exact next character offsets. File pages return a receipt indicating
+whether coverage was recorded; skipped offsets do not count. Existing complete
+coverage is reused only for unchanged file candidates. Coverage is not a quality
+verdict, and `previous_review` pages do not cover the original baseline.
+
+`repo_evidence action=register file=...` retains an exact text verification file
+from the assigned repositories or task `references/` (json/log/sha256/md/txt/csv;
+regular singly linked file up to 2 MiB). Implementer, Scout and Researcher may
+register; other source roles can read their own IDs. Reviewer/Oracle may read
+IDs of members in their assigned tasks using `action=read`, optionally `agent`,
+`offset`, `limit` or `query`. Symlinks, path escape and unassigned repositories
+are rejected. Snapshot hash/completeness describes the captured file, not its
+upstream producer or code freshness; `sourceVersion` remains unrecorded.
+Managers receive compact references, not the raw file. Single-file `repo_source`
+search is supported; bounded searches do not promise exhaustive matches.
+
+Managers record `repo_coordination` states: `authorized`, `waiting_children`,
+`waiting_user`, `blocked_system` or `done`, with a concrete next action.
+`waiting_children` requires a real pending child; `waiting_user` requires the
+reason and the actual question asked. This tool records model judgment, not new
+authorization, and `done` does not grant approval. The main widget displays
+recorded reasons. An Orchestrator with unfinished work but no active child or
+concrete blocker/question gets at most one settle-time continuation per input,
+then must continue authorized work or explain its blocker. It never repeatedly
+polls models, automatically changes providers or bypasses a completion gate.
+A retired agent prompt returns an explicit `submitted:false` next action;
+replacement still requires confirmed exit and release of its owned record.
+
+`node scripts/test-repair-live.mjs TASK_ROOT EVIDENCE_DIR` extends the disposable
+hierarchy fixture with an injected external progress edit, same-job approval
+repair, progress-note approval reuse and registered verification evidence. Run
+only inside a dedicated test Herdr server/profile. Unit tests cover the failure
+and stale-target paths. Small-fixture success does not establish general cost
+savings, engineering quality or immunity to model/provider failures.

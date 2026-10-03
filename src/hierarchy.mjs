@@ -882,6 +882,17 @@ export async function workStatus(client, id, complete = false, commit = true) {
     approvalStatus: await approvalStatus(w),
     attempts: w.reviews.length,
     reviewLimit: w.reviewLimit,
+    lead: w.lead
+      ? {
+          id: w.lead.id,
+          role: "task_lead",
+          instruction:
+            "Address this current lead from its owning Orchestrator; its children belong to the lead's scope.",
+        }
+      : null,
+    latestReview: w.reviews.at(-1)
+      ? { agent: w.reviews.at(-1).agentId, job: w.reviews.at(-1).jobId }
+      : null,
   };
 }
 export async function taskCandidate(client, id) {
@@ -1109,31 +1120,41 @@ export async function reviseWork(client, id, requirements) {
 }
 export async function taskNote(
   client,
-  { text = /** @type {string | undefined} */ (undefined) },
+  { text = /** @type {string|undefined} */ (undefined), kind = "decision" },
 ) {
   const id = client.delegation?.bundle;
   assertTaskOwner(client, id);
+  if (!["decision", "progress"].includes(kind))
+    throw Error("Note kind must be decision or progress.");
   const scope = scopeOf(client),
     w = await getWork(scope, id);
+  const field = kind === "progress" ? "progressNotes" : "notes";
   if (text !== undefined) {
     if (typeof text !== "string" || text.length > 8000)
-      throw new Error("Task notes are limited to 8000 characters.");
-    if (w.status === "completed")
-      throw new Error(
-        "Ask the Orchestrator to reopen completed work before refinements.",
+      throw Error("Task notes are limited to 8000 characters.");
+    if (w[field] === text) return { id, kind, text, revision: w.noteRevision };
+    if (kind === "decision") {
+      if (w.status === "completed")
+        throw Error(
+          "Ask the Orchestrator to reopen completed work before refinements.",
+        );
+      await idleMembers(
+        client,
+        w.members.filter((m) => m.role === "reviewer"),
       );
-    await idleMembers(
-      client,
-      w.members.filter((m) => m.role === "reviewer"),
-    );
-    if (w.notes === text)
-      return { id, text: w.notes, revision: w.noteRevision };
-    w.notes = text;
-    w.noteRevision++;
-    w.status = "working";
+      w.noteRevision++;
+      w.status = "working";
+    }
+    w[field] = text;
     await save(scope, "work", w);
   }
-  return { id, text: w.notes, revision: w.noteRevision };
+  return {
+    id,
+    kind,
+    text: w[field] ?? "",
+    revision: w.noteRevision,
+    approvalAffected: kind === "decision",
+  };
 }
 export async function inspectHierarchyReview(
   request,

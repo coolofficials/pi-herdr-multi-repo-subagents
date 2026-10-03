@@ -186,3 +186,24 @@ test("broken display data cannot interrupt child lifecycle handling", async (t) 
   );
   assert.match(statuses.get("repo-workflow"), /Implementer.*unavailable/);
 });
+
+test("Orchestrator displays actual waiting/blocker reason and next action", () => {
+  const view = describe({
+    role: "orchestrator",
+    title: "Project",
+    idle: true,
+    coordination: [
+      {
+        id: "a",
+        title: "A",
+        status: "blocked_system",
+        reason: "Tracker edit needs classification",
+        nextAction: "Repair saved report",
+      },
+    ],
+  });
+  assert.ok(view.lines.some((l) => l.includes("1 blocked")));
+  assert.ok(
+    view.lines.some((l) => l.includes("Tracker edit needs classification")),
+  );
+});

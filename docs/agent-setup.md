@@ -25,7 +25,7 @@ pi list
 
 명령이 없으면 나머지 확인을 계속하고 해당 구성요소만 설치합니다. 환경변수 전체나 인증 파일을 출력하지 않습니다. API key/bearer token을 출력하는 `pi auth` 하위 명령은 준비 상태 확인용으로 사용하지 않습니다.
 
-이 문서는 **v0.10.4 소스**를 기준으로 작성되었습니다. `package.json`의 버전이 있다고 같은 Git 태그나 npm 버전이 배포되어 있는 것은 아닙니다. 설치할 원격 ref의 존재와 내용을 먼저 확인합니다. 로컬 전용 기능을 이전 원격 설치본에서 사용할 수 있다고 설명하지 않습니다.
+이 문서는 **v0.10.5 소스**를 기준으로 작성되었습니다. `package.json`의 버전이 있다고 같은 Git 태그나 npm 버전이 배포되어 있는 것은 아닙니다. 설치할 원격 ref의 존재와 내용을 먼저 확인합니다. 로컬 전용 기능을 이전 원격 설치본에서 사용할 수 있다고 설명하지 않습니다.
 
 ## 2. 필수 환경 설치
 
@@ -305,3 +305,14 @@ Reviewer/Oracle은 `repo_artifact`에 `id`만 전달해도 할당된 작업의 �
 자식 시작은 `waiting-shell` → `starting` → `ready` 순서로 진행합니다. 생성 응답의 pane·terminal·tab 식별자를 유지하며, 최대 10초 동안 셸만 foreground에 있는 상태가 500 ms 이상 유지되는지 확인합니다. 셸 초기화 중인 프로세스나 알 수 없는 상태에서는 기다리고, agent 점유·복원 오류·식별자 변경은 시작을 중단합니다. 이 관찰만으로 실제 프롬프트 준비를 보장하지는 않으며 최종 실행 가능 여부는 Herdr의 `agent start` 검사를 따릅니다.
 
 시작 요청은 한 번만 보냅니다. 실패 시 pane과 기록을 보존하며 `startup-error.json`의 `stage`로 준비 대기와 실행 단계 오류를 구분합니다. `shell-ready.json`은 셸 관찰 근거이며 Pi 준비 완료나 작업 실행 성공 기록이 아닙니다. 오류 후 시작 요청 자동 재전송·Enter/Ctrl+C 주입·pane 종료·기존 실패 작업 자동 복구는 하지 않습니다.
+
+
+## 보고서·진행 상태 복구 (v0.10.5)
+
+- 실패한 리뷰 제출은 draft를 보존하지만 승인은 주지 않습니다. Orchestrator가 외부 진행 문서를 읽고 `repo_task_document action=reconcile`로 분류한 뒤, 해당 Reviewer의 직접 부모가 `repo_agent_repair {id}` 또는 기존 `repo_request_review`로 같은 job의 저장을 재개합니다. 코드·계약·열람 범위 조건은 다시 확인합니다. 이 경로는 새 pane/모델 호출/리뷰 횟수를 만들지 않습니다.
+- `repo_task_note kind=progress`는 상태·인계만 저장하여 승인을 유지합니다. 구현 판단·사용자 refinement는 `kind=decision` 또는 `repo_task_input`에 넣습니다. 요구사항 변경은 Orchestrator의 버전 계약으로 처리합니다.
+- `repo_review_changes coverage=true`로 부족한 baseline 페이지를 확인하고 반환된 nextExpectedOffset을 그대로 사용합니다. 열람 기록이 검토 품질을 보장하지는 않습니다.
+- root의 검증용 `.json/.log/.sha256`를 Markdown으로 복제할 필요가 없습니다. 작업/조사 agent가 `repo_evidence action=register file=references/...`로 보존하고 Reviewer/Oracle이 ID로 읽습니다. 임의 파일 권한이나 원본 diff 권한을 관리자에게 부여하지 않습니다.
+- Task Lead의 조회 요청만 완료했다면 `repo_agent_report completion=job`를 사용합니다. 전체 task 완료에는 기존 승인 조건이 그대로 필요합니다.
+- `repo_coordination`은 다음 행동과 실제 대기 이유를 저장합니다. `waiting_user`에는 최종 응답에서 물은 실제 질문이 필요하고 `waiting_children`은 진행 중 자식이 있어야 합니다. 완료 승인이나 추가 사용자 권한을 생성하지 않습니다.
+- 사용자 진행 세션에는 reload/재시작을 강제하지 않습니다. 이전 snapshot을 유지하고 package source를 새 버전으로 변경한 후 새 메인 Pi에서 사용하는 것이 일관된 적용 방법입니다. 기존 세션의 결과 파일을 수동 수정해 승인하지 않습니다. 오래된 제출에는 새 draft가 없을 수 있어 자동 복구를 보장하지 않습니다.

@@ -1,3 +1,6 @@
+import { inspectionProgress } from "./inspection.mjs";
+import { verificationEvidence } from "./evidence.mjs";
+import { saveSubmission, failureInfo } from "./reports.mjs";
 import { singleGuidance, CAPABILITY_ROUTING_GUIDANCE } from "./routing.mjs";
 import { imageInput } from "./images.mjs";
 import {
@@ -159,9 +162,11 @@ export default function childBridge(pi: ExtensionAPI) {
         interrupted: children.interrupted,
       });
     }
+    let validationFailure: any;
     let taskApproval = submitted?.taskApproval;
     if (
       role === "task_lead" &&
+      submitted?.completion !== "job" &&
       brief?.outcome === "completed" &&
       !forced &&
       outcome === "completed"
@@ -171,12 +176,16 @@ export default function childBridge(pi: ExtensionAPI) {
           await workStatus(coordinator, request.bundle, true);
           return validateLeadCompletion(launch.workScope, request.bundle);
         });
-      } catch {
-        brief = validateBrief({
-          outcome: "incomplete",
-          summary: "Task approval changed before completion report settled.",
-          risks: ["Reconcile task state and review again before completion."],
+      } catch (error) {
+        validationFailure = failureInfo(error);
+        await writeJSON(path.join(dir, `${id}.draft.json`), {
+          jobId: id,
+          brief,
+          completion: submitted?.completion ?? "task",
+          status: "blocked",
+          failure: validationFailure,
         });
+        brief = undefined;
         taskApproval = undefined;
       }
     }
@@ -184,15 +193,17 @@ export default function childBridge(pi: ExtensionAPI) {
     if (review && brief?.verdict === "pass") {
       try {
         review = await validateReviewTarget(request, dir, id);
-      } catch {
-        brief = validateBrief({
-          outcome: "incomplete",
-          summary:
-            "Cannot confirm the review target; the prior PASS is invalid.",
-          risks: ["Inspect the checkout and restore a verifiable state."],
-          verdict: "unknown",
+      } catch (error) {
+        validationFailure = failureInfo(error);
+        await writeJSON(path.join(dir, `${id}.draft.json`), {
+          jobId: id,
+          brief,
+          completion: submitted?.completion ?? "task",
+          status: "blocked",
+          failure: validationFailure,
         });
-        review = { ...review, invalidated: true };
+        brief = undefined;
+        review = undefined;
       }
     }
     const status =
@@ -207,6 +218,13 @@ export default function childBridge(pi: ExtensionAPI) {
         brief,
         review,
         taskApproval,
+        completion: submitted?.completion,
+        failure:
+          validationFailure ??
+          (await readJSON(path.join(dir, `${id}.draft.json`)))?.failure ??
+          (report.error
+            ? failureInfo(report.error, "provider_error")
+            : undefined),
         role,
         execution: request?.contract?.directManager
           ? {
@@ -354,7 +372,18 @@ export default function childBridge(pi: ExtensionAPI) {
       : [];
   const allowed = () => {
     if (reportRepair && !detached)
-      return ["repo_agent_report", "repo_artifact"];
+      return [
+        "repo_agent_report",
+        "repo_artifact",
+        ...(["reviewer", "oracle"].includes(role)
+          ? [
+              "repo_review_changes",
+              "repo_source",
+              "repo_evidence",
+              ...(role === "reviewer" ? ["repo_review_scope"] : []),
+            ]
+          : []),
+      ];
     if (detached)
       return normalTools.filter((name) => !name.startsWith("repo_"));
     if (role === "task_lead") return [...LEAD_TOOLS];
@@ -382,6 +411,7 @@ export default function childBridge(pi: ExtensionAPI) {
       "repo_reference_read",
       "repo_reference_search",
       "repo_artifact",
+      "repo_evidence",
       "repo_checkpoint",
       "repo_agent_report",
       ...(role === "researcher" && jobId
@@ -518,8 +548,18 @@ export default function childBridge(pi: ExtensionAPI) {
             "Researcher web fetching accepts HTTPS URLs only, never local files.",
         };
     }
-    if (dir && jobId && event.toolName !== "repo_agent_report")
+    if (dir && jobId && event.toolName !== "repo_agent_report") {
       await fs.rm(path.join(dir, `${jobId}.brief.json`), { force: true });
+      // Further work invalidates the final decision, but retains it in history.
+      const draft = await readJSON(path.join(dir, `${jobId}.draft.json`));
+      if (draft) {
+        await writeJSON(
+          path.join(dir, `${jobId}.draft-invalidated.json`),
+          draft,
+        );
+        await fs.rm(path.join(dir, `${jobId}.draft.json`), { force: true });
+      }
+    }
   });
   pi.on("tool_result", async (event) => {
     if (
@@ -919,8 +959,14 @@ export default function childBridge(pi: ExtensionAPI) {
       name: "repo_review_changes",
       label: "Inspect review change",
       description:
-        "List all changed paths against the saved pre-implementation baseline, or retrieve bounded before/after text for one changed file. File offsets are characters. since=previous_review isolates remediation; baseline (default) shows the whole bundle. Verify the target fingerprint; include surrounding code with repo_source. Inspect all relevant changes before submitting a verdict.",
+        "List all changed paths against the saved pre-implementation baseline, or retrieve bounded before/after text for one changed file. File offsets are characters. since=previous_review isolates remediation; baseline (default) shows the whole bundle. Verify the target fingerprint; include surrounding code with repo_source. Inspect all relevant changes before submitting a verdict. coverage=true lists missing baseline pages; each page returns an explicit coverage receipt and nextExpectedOffset.",
       parameters: Type.Object({
+        coverage: Type.Optional(
+          Type.Boolean({
+            description:
+              "Return recorded coverage and remaining baseline pages without source text.",
+          }),
+        ),
         evidenceTask: Type.Optional(
           Type.String({
             description:
@@ -956,7 +1002,18 @@ export default function childBridge(pi: ExtensionAPI) {
             throw new Error(
               "Only an independent reviewer/oracle may inspect changes.",
             );
+          if (params.coverage)
+            return result(
+              await inspectionProgress(
+                work,
+                dir!,
+                jobId!,
+                params.repo,
+                params.offset,
+              ),
+            );
           const inspected = await inspectHierarchyReview(work, params);
+          let receipt: any;
           if (params.repo && "fingerprint" in inspected) {
             const evidence = await readJSON(
               path.join(dir!, `${jobId}.inspection.json`),
@@ -975,11 +1032,22 @@ export default function childBridge(pi: ExtensionAPI) {
                 next: 0,
                 complete: false,
               };
-              if ((params.offset ?? 0) === fileState.next) {
+              const accepted = (params.offset ?? 0) === fileState.next;
+              if (accepted) {
                 fileState.complete = inspected.nextOffset === null;
                 fileState.next = inspected.nextOffset;
               }
               entry.files[params.file] = fileState;
+              receipt = {
+                accepted,
+                complete: fileState.complete,
+                nextExpectedOffset: fileState.next,
+                unit: "characters",
+                since: "baseline",
+                instruction: accepted
+                  ? "Follow nextExpectedOffset until complete."
+                  : "Skipped pages do not count. Continue from nextExpectedOffset; do not guess offsets.",
+              };
               if (role === "reviewer" && fileState.complete) {
                 const target = work.contract.review.targets[params.repo];
                 const file = path.relative(
@@ -996,8 +1064,43 @@ export default function childBridge(pi: ExtensionAPI) {
               evidence,
             );
           }
-          return result(inspected);
+          return result({
+            ...inspected,
+            receipt,
+            ...(params.repo
+              ? {
+                  coverage: await inspectionProgress(
+                    work,
+                    dir!,
+                    jobId!,
+                    params.repo,
+                  ),
+                }
+              : {}),
+          });
         });
+      },
+    }),
+  );
+  pi.registerTool(
+    defineTool({
+      name: "repo_evidence",
+      label: "Verification file evidence",
+      description:
+        "Execution/research roles register exact assigned-repo or task references/ text verification files (json/log/sha256/md/txt/csv, max 2 MiB) into an immutable snapshot. Report the ID and owner. Reviewer/Oracle read IDs from assigned task members with bounded pages/query; no arbitrary root file access, no implied source freshness, and no replacement for change inspection.",
+      parameters: Type.Object({
+        action: Type.Union([Type.Literal("register"), Type.Literal("read")]),
+        file: Type.Optional(Type.String()),
+        id: Type.Optional(Type.String()),
+        agent: Type.Optional(Type.String()),
+        offset: Type.Optional(Type.Integer({ minimum: 0 })),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000 })),
+        query: Type.Optional(Type.String({ maxLength: 200 })),
+      }),
+      async execute(_call, params) {
+        return result(
+          await verificationEvidence(launch, activeRequest(), dir!, params),
+        );
       },
     }),
   );
@@ -1035,13 +1138,16 @@ export default function childBridge(pi: ExtensionAPI) {
         name: "repo_agent_report",
         label: "Submit compact report",
         description:
-          "Submit the final structured report (max 6000 characters total). Keep facts, requirements/decisions, actual checks, blockers, next steps and evidence paths/URLs. Do not include code, diffs or logs. This report replaces any prior draft for this job; end your turn after it. Any subsequent tool call invalidates it. Review PASS requires acceptance and verification evidence, no unresolved risks/next steps, and the unchanged assigned target.",
+          "Submit the final structured report (max 6000 characters total). Keep facts, requirements/decisions, actual checks, blockers, next steps and evidence paths/URLs. Do not include code, diffs or logs. Task Lead may use completion=job to finish a diagnostic or bounded request without claiming task approval. Failed submissions retain a draft for same-job repair. This report replaces any prior draft for this job; end your turn after it. Any subsequent tool call invalidates it. Review PASS requires acceptance and verification evidence, no unresolved risks/next steps, and the unchanged assigned target.",
         parameters: Type.Object({
           outcome: Type.Union([
             Type.Literal("completed"),
             Type.Literal("blocked"),
             Type.Literal("incomplete"),
           ]),
+          completion: Type.Optional(
+            Type.Union([Type.Literal("task"), Type.Literal("job")]),
+          ),
           summary: Type.String({ minLength: 1, maxLength: 1200 }),
           facts: items,
           decisions: items,
@@ -1061,63 +1167,9 @@ export default function childBridge(pi: ExtensionAPI) {
         }),
         async execute(_call, params) {
           const work = activeRequest();
-          const brief = validateBrief(params);
-          if (
-            role === "implementer" &&
-            work.contract?.directManager &&
-            brief.outcome === "completed"
-          ) {
-            if (
-              await readJSON(path.join(dir!, `${jobId}.review-required.json`))
-            )
-              throw Error(
-                "Review escalation blocks completed outcome. Report incomplete with the reason; Orchestrator must resolve it.",
-              );
-            if (!brief.checks.length || !brief.references.length)
-              throw Error(
-                "Direct execution completion needs actual checks and evidence references; do not claim independent approval.",
-              );
-          }
-          let review;
-          let taskApproval;
-          if (role === "task_lead" && brief.outcome === "completed") {
-            await coordinator.requireOwnership();
-            const checked = await coordinator.locked(() =>
-              workStatus(coordinator, work.bundle, true, false),
-            );
-            taskApproval = checked.approval;
-          }
-          if (["reviewer", "oracle"].includes(role)) {
-            if (!brief.verdict || !work.contract?.review)
-              throw new Error(
-                "A reviewer needs an assigned review contract and verdict.",
-              );
-            if (
-              brief.verdict === "pass" &&
-              (brief.outcome !== "completed" ||
-                !brief.checks.length ||
-                !brief.references.length ||
-                brief.risks.length ||
-                brief.next.length)
-            )
-              throw new Error(
-                "PASS needs acceptance/verification evidence and references without unresolved risks or next steps. Otherwise submit changes_requested/unknown.",
-              );
-            review =
-              brief.verdict === "pass"
-                ? await withEvidence(() =>
-                    validateReviewTarget(work, dir!, jobId!),
-                  )
-                : work.contract.review;
-          } else if (brief.verdict)
-            throw new Error(
-              "Only an assigned independent reviewer may submit a review verdict.",
-            );
-          await writeJSON(path.join(dir!, `${jobId}.brief.json`), {
-            brief,
-            review,
-            taskApproval,
-          });
+          await withEvidence(() =>
+            saveSubmission(coordinator, work, dir!, jobId!, params),
+          );
           return result({
             status: "report-saved",
             jobId,
@@ -1442,6 +1494,8 @@ export default function childBridge(pi: ExtensionAPI) {
       const state = await childWorkState(await coordinator.records());
       if (state.waiting.length && !state.interrupted.length) return;
     }
+    const draft = await readJSON(path.join(dir, `${jobId}.draft.json`));
+    if (draft?.failure?.kind === "progress_input_pending") return;
     const file = path.join(dir, `${jobId}.repair.json`),
       repair = await readJSON(file, { attempts: 0 });
     if (repair.attempts >= 1) return;
@@ -1460,7 +1514,7 @@ export default function childBridge(pi: ExtensionAPI) {
           customType: "repo-report-repair",
           display: true,
           content:
-            "The execution turn ended without a structured report. SAME job and review attempt; do not repeat implementation or checks. Submit repo_agent_report from existing evidence. If evidence is insufficient, report incomplete/unknown and exact gaps. One automatic repair only.",
+            "The execution turn ended without a structured report. SAME job and review attempt; do not repeat implementation or checks. Review roles may finish missing scoped inspection only. Submit repo_agent_report from existing evidence. If evidence is insufficient, report incomplete/unknown and exact gaps. One automatic repair only.",
         },
       ],
     };

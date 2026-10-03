@@ -97,6 +97,7 @@ function artifactPage(value, id, { offset = 0, limit = 8000, query } = {}) {
     exitCode: value.exitCode,
     createdAt: value.createdAt,
     hash: value.hash,
+    file: value.file,
     isError: value.isError,
     complete: value.complete,
     chars: value.chars,

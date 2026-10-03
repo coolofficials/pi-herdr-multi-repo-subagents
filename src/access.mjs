@@ -103,13 +103,18 @@ export async function inspectSource(
 ) {
   if (action === "read") return readText(root, file, offset, limit);
   const directory = await scopedPath(root, file);
-  const files = await sourceFiles(directory);
+  const single = (await fs.lstat(directory)).isFile();
+  const files = single
+    ? [path.basename(directory)]
+    : await sourceFiles(directory);
+  const searchRoot = single ? path.dirname(directory) : directory;
+  const displayRoot = single ? path.dirname(file) : file;
   if (action === "list") {
     const matches = files.filter((name) => name.includes(query));
     return {
       files: matches
         .slice(offset, offset + 100)
-        .map((name) => path.join(file, name)),
+        .map((name) => path.join(displayRoot, name)),
       total: matches.length,
       nextOffset: offset + 100 < matches.length ? offset + 100 : null,
     };
@@ -121,7 +126,7 @@ export async function inspectSource(
   let scanned = offset;
   for (const name of files.slice(offset, offset + 300)) {
     scanned++;
-    const source = await scopedPath(directory, name);
+    const source = await scopedPath(searchRoot, name);
     const stat = await fs.lstat(source);
     if (!stat.isFile() || stat.nlink !== 1 || stat.size > 256000) continue;
     bytes += stat.size;
@@ -131,7 +136,7 @@ export async function inspectSource(
     for (const [index, line] of data.split("\n").entries()) {
       if (line.includes(query))
         matches.push({
-          file: path.join(file, name),
+          file: path.join(displayRoot, name),
           line: index + 1,
           text: line.slice(0, 300),
         });
@@ -141,8 +146,9 @@ export async function inspectSource(
   }
   return {
     matches,
+    matchLimitReached: matches.length >= 40,
     nextOffset: scanned < files.length ? scanned : null,
-    note: "Literal search; hidden/generated files, binary and large files omitted. Read a known path explicitly when needed.",
+    note: "Literal search; hidden/generated files, binary and large files omitted. The 40-match limit may omit later matches within scanned files. Read a known path explicitly for complete evidence.",
   };
 }
 export async function taskDocument(

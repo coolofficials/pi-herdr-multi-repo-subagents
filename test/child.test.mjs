@@ -398,3 +398,74 @@ test("report schema exposes verdict only to independent review roles", async (t)
     );
   }
 });
+
+test("provider quota error reaches the parent as a bounded failure cause", async (t) => {
+  const { dir, emit } = await child(t);
+  await emit("input", { text: `${MARKER}job-1\nWork` });
+  await emit("message_end", {
+    message: {
+      role: "assistant",
+      content: [],
+      errorMessage: "Codex usage limit reached",
+      stopReason: "error",
+    },
+  });
+  await emit("agent_before_settle", { outcome: "error" });
+  await emit("agent_settled");
+  assert.equal(
+    (await readJSON(path.join(dir, "job-1.result.json"))).failure.kind,
+    "provider_limit",
+  );
+});
+test("baseline page receipts reject skipped offsets and show how to complete coverage", async (t) => {
+  const f = await child(t, { role: "reviewer" }),
+    repo = path.join(f.dir, "repo");
+  await fs.mkdir(repo);
+  execFileSync("git", ["init", "-q", repo]);
+  await fs.writeFile(path.join(repo, "large.txt"), "before\n");
+  const baseline = path.join(f.dir, "baseline.json");
+  await writeJSON(baseline, await snapshot(repo));
+  await fs.writeFile(path.join(repo, "large.txt"), "after\n".repeat(3000));
+  const saved = path.join(f.dir, "target.json"),
+    current = await snapshot(repo);
+  await writeJSON(saved, current);
+  await writeJSON(path.join(f.dir, "request.json"), {
+    jobId: "job-1",
+    owner: "parent",
+    role: "reviewer",
+    contract: {
+      root: f.dir,
+      review: {
+        kind: "work",
+        targets: {
+          repo: {
+            path: repo,
+            baseline,
+            snapshot: saved,
+            target: current.fingerprint,
+          },
+        },
+      },
+    },
+  });
+  await f.emit("input", { text: `${MARKER}job-1\nReview` });
+  const tool = f.registered.get("repo_review_changes");
+  let result = await tool.execute("call", {
+    repo: "repo",
+    file: "large.txt",
+    offset: 7000,
+  });
+  assert.equal(result.details.receipt.accepted, false);
+  assert.equal(result.details.receipt.nextExpectedOffset, 0);
+  for (const offset of [0, 7000, 14000])
+    result = await tool.execute("call", {
+      repo: "repo",
+      file: "large.txt",
+      offset,
+    });
+  assert.equal(result.details.receipt.complete, true);
+  assert.equal(
+    result.details.coverage.repositories[0].gateCoverageSatisfied,
+    true,
+  );
+});

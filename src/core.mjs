@@ -1,3 +1,4 @@
+import { repairSubmission } from "./reports.mjs";
 import { singleGuidance } from "./routing.mjs";
 import { REFERENCE_DIRECTORY, validateResearchConfig } from "./references.mjs";
 import {
@@ -469,7 +470,9 @@ export class Controller {
   async record(id) {
     const record = (await this.records()).find((x) => x.id === id);
     if (!record)
-      throw new Error("Unknown agent ID for this main Pi process and root.");
+      throw new Error(
+        "Unknown agent ID in this manager scope. Use repo_work status for the current lead, then that lead's repo_agent_list for its children. Old Lead children cannot be adopted by a new manager.",
+      );
     return record;
   }
   async history() {
@@ -680,8 +683,8 @@ export class Controller {
           return {
             pending: true,
             record,
-            status:
-              "needs-attention: report repair exhausted; inspect the child, do not repeat review",
+            repair: await repairSubmission(this, record),
+            status: "report-repair",
           };
         if (state.pending)
           return { pending: true, record, status: state.phase };
@@ -728,9 +731,10 @@ export class Controller {
     if (prepared.pending)
       return {
         id: prepared.record.id,
-        status: prepared.status,
+        status: prepared.repair?.status ?? prepared.status,
+        ...(prepared.repair ?? {}),
         message:
-          "An accepted review already exists. Await its report; no duplicate was sent.",
+          "An accepted review already exists. Inspect the returned status/report; no duplicate was sent.",
       };
     if (prepared.approved)
       return {
@@ -753,6 +757,16 @@ export class Controller {
       { repo: ".", role, bundle: id, task, model, thinking },
       signal,
     );
+  }
+  async repairReport(id) {
+    await this.requireOwnership();
+    return this.locked(async () => {
+      const record = (await this.records()).find(
+        (r) => r.id === id && r.owner === this.owner,
+      );
+      if (!record) throw Error("Repair only an agent owned by this manager.");
+      return { id, ...(await repairSubmission(this, record)) };
+    });
   }
   async start(
     {
@@ -1174,7 +1188,26 @@ export class Controller {
       this.lifecycle.assertOwned();
       const records = await this.records();
       const record = records.find((r) => r.id === id);
-      if (!record) throw new Error("Unknown agent ID.");
+      if (!record)
+        throw new Error(
+          "Unknown agent ID in this manager scope. Use repo_work status for the current lead and repo_agent_list for its directly managed agents; children from an old Lead belong to that Lead, not this manager.",
+        );
+      if (await readJSON(path.join(record.dir, "retired.json"))) {
+        const state = await executionState(record);
+        const exited =
+          state.ready?.cleanExit && liveness(state.ready.instance) === "dead";
+        return {
+          id: record.id,
+          status: exited ? "exited" : "retiring",
+          role: record.role,
+          bundle: record.bundle,
+          repo: record.repo,
+          nextAction: exited
+            ? "Forget the confirmed exited record, then start a new agent with the retained report and scoped follow-up."
+            : "Wait for confirmed exit; do not resend this prompt or start a duplicate. The prior report remains available.",
+          submitted: false,
+        };
+      }
       if (
         record.jobId &&
         !(await readJSON(path.join(record.dir, `${record.jobId}.result.json`)))
