@@ -429,7 +429,7 @@ Snapshots include tracked and non-ignored untracked files for Git/colocated jj. 
 
 ### Updating
 
-Finish old work before restarting Pi. Earlier role-switching or hierarchy sessions are **not automatically migrated**. Start a fresh main process/conversation with a concise handoff. This installed local checkout is loaded on restart; `/reload` may retain imported modules. The local `pre-consistency-v0.5.0` bookmark preserves the source before these changes. Do not hot-reload this update into active work.
+Finish accepted work before restarting Pi. Pre-hierarchy sessions (v0.4 and earlier) are **not automatically migrated**. Retained schema-2 hierarchical workflows can use the v0.10.6 recovery procedure below, preserving their existing work IDs and review budgets. This installed local checkout is loaded on restart; `/reload` may retain imported modules. The local `pre-consistency-v0.5.0` bookmark preserves the source before these changes. Do not hot-reload this update into active work.
 
 v0.6.1 fixes a live-discovered race: parallel Reviewer/Oracle inspection tools could overwrite each other's coverage records, causing a false missing-inspection rejection and unnecessary re-review. A per-session queue now serializes evidence updates and PASS validation.
 
@@ -439,16 +439,16 @@ Automated tests cover lifecycle controls, role restrictions, pending Lead report
 
 Process identity still owns each family. Task Leads have separate coordination scopes and immediate child registries; every descendant also observes ancestor identities. Root exit prevents new work throughout the tree. Busy leaves finish accepted jobs and save results; Leads drain accepted children and record interrupted coordination before exiting. Lead exit drains its own subtree. No new process automatically adopts an old family. Nested draining and recovery have been exercised in isolated real Pi/Herdr sessions; no exact shutdown deadline is promised.
 
-| Event                                                           | Behavior                                                                                                              |
-| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Close the Herdr UI while the main Pi process remains alive      | Keep children and their work running.                                                                                 |
-| Main Pi exits, normally or by a confirmed process death         | Idle children exit. Busy children finish the accepted request, save its report, then exit. New requests are rejected. |
-| Parent liveness cannot be determined                            | Retain children and show an unknown-state indicator.                                                                  |
-| Compact or reload the main conversation in the same process     | Preserve ownership and child sessions.                                                                                |
-| Start a fresh main conversation through the handoff command     | Preserve children; carry a concise handoff and report acknowledgements.                                               |
-| Start a new Pi process, including resume of an old conversation | Create a new parent family. Previous reports remain readable; previous children are never adopted.                    |
-| A previous parent's child is still finishing                    | Keep its checkout reserved until it exits.                                                                            |
-| Start ordinary Pi again in a former child pane                  | Start ordinary Pi. The child role is a one-use process launch argument, not a shell environment variable.             |
+| Event                                                           | Behavior                                                                                                                        |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Close the Herdr UI while the main Pi process remains alive      | Keep children and their work running.                                                                                           |
+| Main Pi exits, normally or by a confirmed process death         | Idle children exit. Busy children finish the accepted request, save its report, then exit. New requests are rejected.           |
+| Parent liveness cannot be determined                            | Retain children and show an unknown-state indicator.                                                                            |
+| Compact or reload the main conversation in the same process     | Preserve ownership and child sessions.                                                                                          |
+| Start a fresh main conversation through the handoff command     | Preserve children; carry a concise handoff and report acknowledgements.                                                         |
+| Start a new Pi process, including resume of an old conversation | Create a new parent family. Same-conversation durable records may restore after old processes exit; children are never adopted. |
+| A previous parent's child is still finishing                    | Keep its checkout reserved until it exits.                                                                                      |
+| Start ordinary Pi again in a former child pane                  | Start ordinary Pi. The child role is a one-use process launch argument, not a shell environment variable.                       |
 
 Parent checks run locally every two seconds. Normal main shutdown records its intent; abrupt exits are detected by PID, process start time and host. A timer does not imply an exact shutdown deadline. Blocked tools, approvals, provider errors, or a hung child can require manual attention. The extension does not force-kill unfinished work after a timeout. If the PC shuts down or the child is also killed, completing its request is not guaranteed.
 

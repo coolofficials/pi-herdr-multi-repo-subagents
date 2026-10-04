@@ -695,3 +695,56 @@ test("continuation refuses changed contracts/artifacts, pending progress and liv
     /contract changed/,
   );
 });
+
+test("restored task tab can reclaim an exited old shell without adopting its agent", async (t) => {
+  const { createTaskPane } = await import("../src/views.mjs");
+  const f = await fixture(t),
+    rev = await reviewer(f);
+  await f.next.connect();
+  const old = {
+    ...rev.record,
+    bundle: f.w.id,
+    pane: "w1:p1",
+    tab: "w1:t1",
+    terminal: "old-terminal",
+  };
+  await writeJSON(path.join(f.old.scope, "agents.json"), [old]);
+  await writeJSON(path.join(f.old.scope, "views", f.w.id + ".json"), {
+    tab: old.tab,
+    anchor: old.pane,
+    closed: false,
+  });
+  const calls = [];
+  const panes = [1, 2, 3, 4].map((n) => ({
+    pane_id: "w1:p" + n,
+    tab_id: old.tab,
+    terminal_id: n === 1 ? old.terminal : "other",
+  }));
+  const client = {
+    scope: f.next.scope,
+    workScope: f.old.scope,
+    env: { HERDR_WORKSPACE_ID: "w1" },
+    call: async (args) => {
+      calls.push(args);
+      if (args[1] === "list") return { result: { panes } };
+      if (args[1] === "get") return { result: { pane: panes[0] } };
+      if (args[1] === "process-info")
+        return {
+          result: {
+            process_info: {
+              shell_pid: 2147483647,
+              foreground_process_group_id: 2147483647,
+              foreground_processes: [{ pid: 2147483647 }],
+            },
+          },
+        };
+      if (args[1] === "close") return { result: {} };
+      if (args[1] === "split")
+        return { result: { pane: { pane_id: "w1:p5", tab_id: old.tab } } };
+      throw Error("Unexpected call " + args);
+    },
+  };
+  await createTaskPane(client, { bundle: f.w.id, path: f.root }, undefined, []);
+  assert.equal(calls.filter((c) => c[1] === "close").length, 1);
+  assert.deepEqual(await f.next.records(), []);
+});

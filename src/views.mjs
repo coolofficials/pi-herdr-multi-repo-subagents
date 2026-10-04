@@ -55,11 +55,20 @@ export async function createTaskPane(client, record, signal, environment) {
     if (!Array.isArray(panes)) throw Error("Cannot confirm task tab topology.");
     let own = panes.filter((p) => p.tab_id === view.tab);
     if (own.length >= 4) {
-      for (const old of await familyRecords(
+      const familyScope =
         client.delegation?.ancestors?.[0]?.scope ??
-          client.scope ??
-          client.workScope,
-      )) {
+        client.scope ??
+        client.workScope;
+      const current = await familyRecords(familyScope);
+      // A restored task can retain an old full tab. Read its retired records for
+      // safe shell cleanup only; never register or prompt those old processes.
+      const historical =
+        client.workScope && client.workScope !== familyScope
+          ? await familyRecords(client.workScope)
+          : [];
+      for (const old of [
+        ...new Map([...current, ...historical].map((r) => [r.id, r])).values(),
+      ]) {
         if (
           old.bundle !== record.bundle ||
           !own.some((p) => p.pane_id === old.pane) ||
