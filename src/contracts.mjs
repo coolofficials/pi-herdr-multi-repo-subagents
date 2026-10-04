@@ -23,6 +23,7 @@ export const MAIN_TOOLS = new Set([
   "repo_agent_release",
   "repo_agent_recover",
   "repo_agent_repair",
+  "repo_workflow",
   "repo_coordination",
   "repo_task_document",
   "repo_work",
@@ -40,6 +41,7 @@ export const LEAD_TOOLS = new Set([
   "repo_agent_release",
   "repo_agent_recover",
   "repo_agent_repair",
+  "repo_workflow",
   "repo_coordination",
   "repo_work",
   "repo_request_review",
@@ -130,7 +132,7 @@ export function validateBrief(value) {
 export function roleGuidance(role) {
   const responsibility = {
     task_lead:
-      "Own one assigned task. Judge readiness only from implementer conversations and compact reports; never read code or execute shell commands. Delegate implementation and checks within the assigned repositories. Classify every direct-input receipt with repo_task_input: question (local answer, preserve approval), refinement (accept an in-scope adjustment), or escalation (ask Orchestrator to resolve changed acceptance/scope). Unclassified/escalated inputs block advancement. Use repo_task_note kind=decision for decisions affecting work; kind=progress for status and handoff only, preserving approval. Escalate changes to requirements, acceptance criteria or cross-task contracts to the Orchestrator before proceeding. When implementation reports support completion, call repo_request_review; it checks candidacy and starts/reuses the independent reviewer in a separate pane. Route findings back to implementers; batch fixes before requesting another review. Report task completion only after Reviewer PASS; use completion=job for a completed diagnostic request without changing task state; repo_agent_report validates and commits task completion as one operation. Progress/blockers may be reported without approval. Do not narrate every internal step to the Orchestrator. When waiting for children, end the turn without submitting a final report; automatic child reports resume you. Research is optional.",
+      "Own one assigned task. On workflow recovery, read repo_workflow evidence for retained reports before repeating completed implementation; repair a historical needs-report review on its same job/attempt. Judge readiness only from implementer conversations and compact reports; never read code or execute shell commands. Delegate implementation and checks within the assigned repositories. Classify every direct-input receipt with repo_task_input: question (local answer, preserve approval), refinement (accept an in-scope adjustment), or escalation (ask Orchestrator to resolve changed acceptance/scope). Unclassified/escalated inputs block advancement. Use repo_task_note kind=decision for decisions affecting work; kind=progress for status and handoff only, preserving approval. Escalate changes to requirements, acceptance criteria or cross-task contracts to the Orchestrator before proceeding. When implementation reports support completion, call repo_request_review; it checks candidacy and starts/reuses the independent reviewer in a separate pane. Route findings back to implementers; batch fixes before requesting another review. Report task completion only after Reviewer PASS; use completion=job for a completed diagnostic request without changing task state; repo_agent_report validates and commits task completion as one operation. Progress/blockers may be reported without approval. Do not narrate every internal step to the Orchestrator. When waiting for children, end the turn without submitting a final report; automatic child reports resume you. Research is optional.",
     oracle:
       "Independently assess the whole project against its original/current requirements and the accepted task results. Inspect actual artifacts with repo_review_changes and repo_source, especially integration boundaries and missing acceptance evidence. Reuse valid task review evidence rather than repeat every local review. You are read-only: request concrete execution evidence through findings if needed. Submit PASS only when overall completion is supported; otherwise report actionable findings and affected tasks.",
     scout:

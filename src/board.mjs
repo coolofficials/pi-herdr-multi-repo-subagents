@@ -1,3 +1,4 @@
+import { listWork } from "./hierarchy.mjs";
 import {
   loadGlobalModelSettings,
   modelSettingsPath,
@@ -28,7 +29,9 @@ export async function boardSnapshot(scope) {
     const state = await executionState(record);
     const work =
       record.bundle &&
-      (await readJSON(path.join(scope, "work", record.bundle + ".json")));
+      (await readJSON(
+        path.join(parent?.workScope ?? scope, "work", record.bundle + ".json"),
+      ));
     const closed = await readJSON(path.join(record.dir, "view-closed.json"));
     let nextModel,
       modelError = configError;
@@ -70,7 +73,16 @@ export async function boardSnapshot(scope) {
       usage: await readJSON(path.join(record.dir, "context-pressure.json")),
     });
   }
-  return { parent, rows };
+  return {
+    parent,
+    rows,
+    workflow: {
+      id: path.basename(parent?.workScope ?? scope),
+      restored: Boolean(parent?.workScope && parent.workScope !== scope),
+      tasks: (await listWork(parent?.workScope ?? scope)).length,
+      recovery: parent?.workflowRecovery,
+    },
+  };
 }
 const wrap = (line, width) => {
   const lines = [];
@@ -205,7 +217,16 @@ export async function runBoard(scope) {
           lines.push(
             `${i === selected ? ">" : " "} ${r.keep ? "* " : ""}[${r.status}] ${r.label}${r.usage?.warning ? " CONTEXT" : ""}`,
           );
-      if (!rows.length) lines.push("No delegated work yet.");
+      if (snapshot.workflow?.recovery?.status === "blocked")
+        lines.push("Workflow recovery blocked; /repo-agents workflow");
+      else if (snapshot.workflow?.restored)
+        lines.push(`Restored workflow: ${snapshot.workflow.tasks} tasks`);
+      if (!rows.length)
+        lines.push(
+          snapshot.workflow?.restored
+            ? "No workers in this new run. Retained task records remain available."
+            : "No delegated work yet.",
+        );
     }
     lines.push(...modelLines);
     lines.push(note);

@@ -1,4 +1,14 @@
+import {
+  prepareReviewContinuation,
+  attachReviewContinuation,
+} from "./review-continuation.mjs";
 import { repairSubmission } from "./reports.mjs";
+import {
+  restoreWorkflow,
+  workflowHistory,
+  repairWorkflowReport,
+  workflowEvidence,
+} from "./recovery.mjs";
 import { singleGuidance } from "./routing.mjs";
 import { REFERENCE_DIRECTORY, validateResearchConfig } from "./references.mjs";
 import {
@@ -368,16 +378,117 @@ export class Controller {
         ? `${this.root}#lead:${this.delegation.agentId}`
         : undefined,
     });
-    const state = this.lifecycle.connect({
+    const previous = this.lifecycle.read();
+    let state = this.lifecycle.connect({
       sessionId: this.sessionId,
       sessionFile,
       handoff,
+      workScope: this.delegation?.workScope,
     });
     if (state.acquired) {
       this.owner = state.runId;
+      state.role = this.delegation ? "task_lead" : "orchestrator";
+      if (this.delegation) state.workScope = this.workScope;
+      if (!this.delegation) this.workScope = state.workScope ?? this.scope;
       await writeJSON(path.join(this.scope, "parent.json"), state);
+      // Resume records only for the exact same Pi conversation. Execution identity stays new.
+      if (
+        !this.delegation &&
+        previous &&
+        previous.instance.token !== this.identity.token &&
+        previous.sessionId === this.sessionId
+      ) {
+        let candidate = previous.workScope ?? previous.scope;
+        if (
+          !(
+            await fs.readdir(path.join(candidate, "projects")).catch(() => [])
+          ).some((n) => /^[a-f0-9-]{36}\.json$/.test(n))
+        ) {
+          const history = await workflowHistory(this);
+          const matches = [
+            ...new Set(
+              history.runs
+                .filter((r) => r.sameConversation && r.projects > 0)
+                .map((r) => r.workflowId),
+            ),
+          ];
+          if (matches.length === 1)
+            candidate = path.join(path.dirname(this.scope), matches[0]);
+          else {
+            candidate = undefined;
+            if (matches.length > 1) {
+              state = this.lifecycle.bindWorkflow(this.scope, {
+                status: "blocked",
+                reason:
+                  "Multiple historical workflows match this conversation. Inspect repo_workflow history and restore an exact run ID.",
+              });
+              await writeJSON(path.join(this.scope, "parent.json"), state);
+              state.acquired = true;
+            }
+          }
+        }
+        if (candidate && candidate !== this.scope) {
+          try {
+            await this.locked(() =>
+              restoreWorkflow(this, path.basename(candidate)),
+            );
+            state = this.lifecycle.status();
+            state.acquired = true;
+          } catch (error) {
+            const bound = this.lifecycle.status().workScope ?? this.scope;
+            this.workScope = bound;
+            state = this.lifecycle.bindWorkflow(bound, {
+              status: "blocked",
+              runId: path.basename(candidate),
+              reason: String(error.message).slice(0, 600),
+            });
+            await writeJSON(path.join(this.scope, "parent.json"), state);
+            state.acquired = true;
+          }
+        }
+      }
     }
     return state;
+  }
+  async workflow(params) {
+    if (
+      this.delegation &&
+      !["status", "evidence", "repair_report", "resume_review"].includes(
+        params.action,
+      )
+    )
+      throw Error(
+        "Only the Orchestrator may inspect or restore previous workflows.",
+      );
+    if (params.action === "history") return workflowHistory(this);
+    await this.requireOwnership();
+    if (params.action === "restore")
+      return this.locked(() => restoreWorkflow(this, params.runId));
+    if (params.action === "evidence") return workflowEvidence(this, params);
+    if (params.action === "resume_review") {
+      const role = params.kind === "oracle" ? "oracle" : "reviewer";
+      return this.start(
+        {
+          repo: ".",
+          role,
+          bundle: params.id,
+          task: "Continue this unchanged, unfinished independent review on its original job/attempt. Inspect remaining coverage and actual acceptance evidence, reuse retained read receipts, independently submit supported findings or PASS through repo_agent_report. No implementation changes, publication, fabricated verdict or budget reset. This slot permits one new-process continuation only.",
+        },
+        undefined,
+        { role, id: params.id },
+      );
+    }
+    if (params.action === "repair_report")
+      return this.locked(() => repairWorkflowReport(this, params));
+    if (params.action !== "status")
+      throw Error("Unknown workflow recovery action.");
+    return {
+      runId: this.identity.token,
+      workflowId: path.basename(this.workScope),
+      recovery: this.lifecycle.status().workflowRecovery ?? null,
+      instruction:
+        "Inspect repo_work/project status. Restore records with repo_workflow restore when required; never create new tasks to reset a review budget.",
+    };
   }
   async requireOwnership() {
     if (this.delegation) {
@@ -670,6 +781,26 @@ export class Controller {
     const role = this.delegation || directWork ? "reviewer" : "oracle";
     const prepared = await this.locked(async () => {
       if (role === "oracle") await getProject(this.workScope, id);
+      const historical =
+        role === "reviewer"
+          ? await getWork(this.workScope, id)
+          : await getProject(this.workScope, id);
+      const last = historical.reviews.at(-1);
+      if (
+        last &&
+        !(await this.records()).some((r) => r.id === last.agentId) &&
+        (await readJSON(path.join(last.dir, `${last.jobId}.result.json`)))
+          ?.status === "needs-report"
+      )
+        return {
+          pending: true,
+          record: { id: last.agentId },
+          repair: await repairWorkflowReport(this, {
+            kind: role === "reviewer" ? "task" : "oracle",
+            id,
+          }),
+          status: "report-repair",
+        };
       let record = (await this.records()).find(
         (r) => r.role === role && r.bundle === id,
       );
@@ -779,8 +910,16 @@ export class Controller {
       bundle = /** @type {string | undefined} */ (undefined),
     },
     signal,
+    continuation = /** @type {any} */ (undefined),
   ) {
     validateWork(task, context);
+    if (
+      !this.delegation &&
+      this.lifecycle?.status().workflowRecovery?.status === "blocked"
+    )
+      throw Error(
+        "Restore the blocked workflow with repo_workflow restore before dispatching new work; do not bypass its review budget.",
+      );
     roleName(role);
     await this.requireOwnership();
     return this.locked(async () => {
@@ -807,7 +946,11 @@ export class Controller {
         throw new Error(
           "Repository is excluded from discovery. Add it to pi-herdr.json include if intended.",
         );
-      await authorizeDelegation(this, { role, bundle, repo: selected.repo });
+      const reviewContinuation = continuation
+        ? await prepareReviewContinuation(this, role, bundle)
+        : undefined;
+      if (!reviewContinuation)
+        await authorizeDelegation(this, { role, bundle, repo: selected.repo });
       const label = `${role}: ${role === "task_lead" || role === "reviewer" ? (await getWork(this.workScope, bundle)).title : role === "oracle" ? (await getProject(this.workScope, bundle)).title : selected.repo}`;
       const records = await this.records();
       const exclusive = ["implementer"].includes(role);
@@ -826,6 +969,10 @@ export class Controller {
       );
       let reused;
       if (existing) {
+        if (reviewContinuation)
+          throw Error(
+            "A retained Reviewer/Oracle process already occupies this scope. Inspect/release or recover it before continuation; no duplicate started.",
+          );
         const state = await executionState(existing);
         if (state.pending)
           throw Error(
@@ -1061,6 +1208,7 @@ export class Controller {
         return await this.submit(record, records, task, context, signal, {
           role,
           bundle,
+          continuation: reviewContinuation,
         });
       } catch (e) {
         const stage = record.phase;
@@ -1087,7 +1235,11 @@ export class Controller {
     task,
     context,
     signal,
-    { role = record.role ?? "implementer", bundle = record.bundle } = {},
+    {
+      role = record.role ?? "implementer",
+      bundle = record.bundle,
+      continuation = /** @type {any} */ (undefined),
+    } = {},
   ) {
     validateWork(task, context);
     this.lifecycle.assertOwned();
@@ -1121,14 +1273,17 @@ export class Controller {
       throw new Error(
         "A pane belongs to its original task/project. Start a new scoped agent.",
       );
-    await authorizeDelegation(this, { role, bundle, repo: record.repo });
-    const jobId = randomUUID();
+    if (!continuation)
+      await authorizeDelegation(this, { role, bundle, repo: record.repo });
+    const jobId = continuation?.originalJobId ?? randomUUID();
     if (
       record.jobId &&
       !(await readJSON(path.join(record.dir, `${record.jobId}.result.json`)))
     )
       throw new Error("Previous job is not settled.");
-    const contract = await prepareAssignment(this, record, jobId, role, bundle);
+    const contract = continuation
+      ? await attachReviewContinuation(this, continuation, record)
+      : await prepareAssignment(this, record, jobId, role, bundle);
     const instructions = await scopedInstructions(
       this.root,
       Object.keys(contract?.review?.targets ?? {}).length

@@ -13,6 +13,7 @@ const viewPath = (client, bundle) =>
   path.join(client.workScope, "views", bundle + ".json");
 export async function familyRecords(scope) {
   const parent = await readJSON(path.join(scope, "parent.json"));
+  const workScope = parent?.workScope ?? scope;
   const own = await readJSON(path.join(scope, "agents.json"), []);
   const siblings = (
     await fs
@@ -29,7 +30,7 @@ export async function familyRecords(scope) {
     for (const record of records) {
       const launch = await readJSON(path.join(record.dir, "launch.json"));
       if (
-        launch?.workScope === scope &&
+        launch?.workScope === workScope &&
         launch.ancestors?.some(
           (a) => a.identity.token === parent?.instance?.token,
         )
@@ -54,7 +55,11 @@ export async function createTaskPane(client, record, signal, environment) {
     if (!Array.isArray(panes)) throw Error("Cannot confirm task tab topology.");
     let own = panes.filter((p) => p.tab_id === view.tab);
     if (own.length >= 4) {
-      for (const old of await familyRecords(client.workScope)) {
+      for (const old of await familyRecords(
+        client.delegation?.ancestors?.[0]?.scope ??
+          client.scope ??
+          client.workScope,
+      )) {
         if (
           old.bundle !== record.bundle ||
           !own.some((p) => p.pane_id === old.pane) ||
@@ -226,7 +231,7 @@ export async function maintainViews(
           record.bundle &&
           (await readJSON(
             path.join(
-              client.scope,
+              client.workScope ?? client.scope,
               record.role === "oracle" ? "projects" : "work",
               record.bundle + ".json",
             ),
@@ -280,7 +285,7 @@ export async function maintainViews(
   }
   if (client.delegation) return;
   const views = await fs
-    .readdir(path.join(client.scope, "views"))
+    .readdir(path.join(client.workScope ?? client.scope, "views"))
     .catch(() => []);
   const panes = (
     await client.call([
@@ -292,7 +297,7 @@ export async function maintainViews(
   ).result?.panes;
   if (!Array.isArray(panes)) return;
   for (const name of views) {
-    const file = path.join(client.scope, "views", name),
+    const file = path.join(client.workScope ?? client.scope, "views", name),
       view = await readJSON(file);
     if (view && !panes.some((p) => p.tab_id === view.tab))
       await writeJSON(file, { ...view, closed: true });

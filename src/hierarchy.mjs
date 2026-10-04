@@ -13,7 +13,7 @@ import {
   fileState,
 } from "./approval.mjs";
 import { executionState } from "./execution.mjs";
-import { snapshot, reviewChanges } from "./workflow.mjs";
+import { snapshot, reviewChanges, reviewTargetMatches } from "./workflow.mjs";
 import { publicReport } from "./contracts.mjs";
 import { liveness } from "./lifecycle.mjs";
 
@@ -97,6 +97,10 @@ export async function createProject(
   { title, requirements, progressDocuments = /** @type {string[]} */ ([]) },
 ) {
   assertRoot(client);
+  if (client.lifecycle?.status().workflowRecovery?.status === "blocked")
+    throw Error(
+      "Prior workflow recovery is blocked. Use repo_workflow status/history/restore; do not create replacement work to reset its review budget.",
+    );
   validateRequirements(requirements);
   if (!title?.trim() || title.length > 160)
     throw new Error("Provide a project title up to 160 characters.");
@@ -119,6 +123,13 @@ export async function createProject(
 async function idleMembers(client, members, ignoreId) {
   for (const member of members ?? []) {
     if (member.id === ignoreId) continue;
+    if (
+      member.workflowRetirement &&
+      (liveness(member.workflowRetirement.instance) === "dead" ||
+        (member.workflowRetirement.recovered &&
+          (await readJSON(path.join(member.dir, "recovered.json")))))
+    )
+      continue;
     const state = await executionState(member);
     if (state.phase === "recovered") continue;
     if (state.pending)
@@ -508,6 +519,10 @@ export async function prepareAssignment(client, record, jobId, role, bundle) {
       const retired = await readJSON(path.join(w.lead.dir, "recovered.json"));
       if (
         (!retired &&
+          !(
+            w.lead.workflowRetirement &&
+            liveness(w.lead.workflowRetirement.instance) === "dead"
+          ) &&
           (!ready?.cleanExit || liveness(ready?.instance) !== "dead")) ||
         (await client.records()).some((r) => r.id === w.lead.id)
       )
@@ -588,7 +603,7 @@ async function reviewValid(value) {
     if (!(await approvalScopeValid(report.review.approvalScope))) return false;
   } else {
     for (const s of Object.values(latest.targets))
-      if ((await snapshot(s.path)).fingerprint !== s.target) return false;
+      if (!(await reviewTargetMatches(s))) return false;
   }
   if (value.tasks) {
     for (const approval of latest.taskApprovals ?? []) {
@@ -884,10 +899,12 @@ export async function workStatus(client, id, complete = false, commit = true) {
     reviewLimit: w.reviewLimit,
     lead: w.lead
       ? {
+          retired: Boolean(w.lead.workflowRetirement),
           id: w.lead.id,
           role: "task_lead",
-          instruction:
-            "Address this current lead from its owning Orchestrator; its children belong to the lead's scope.",
+          instruction: w.lead.workflowRetirement
+            ? "This is a retired historical Lead. Start a new task_lead for this same task ID, carrying its decisions/evidence; do not prompt or adopt the old process."
+            : "Address this current lead from its owning Orchestrator; its children belong to the lead's scope.",
         }
       : null,
     latestReview: w.reviews.at(-1)
@@ -920,7 +937,7 @@ export async function taskCandidate(client, id) {
     const implementer = w.members
       .filter(
         (m) =>
-          (!m.retired || w.approvalOnly) &&
+          (!m.retired || w.approvalOnly || m.workflowRetirement) &&
           m.repo === repo &&
           m.role === "implementer",
       )
@@ -1202,7 +1219,7 @@ export async function inspectHierarchyReview(
     {
       contract: {
         baseline: target.baseline,
-        review: { target: target.target },
+        review: { target: target.target, snapshot: target.snapshot },
         previousReview: {
           snapshot: request.contract.previousReview?.targets?.[repo]?.snapshot,
         },
@@ -1233,7 +1250,7 @@ export async function validateReviewTarget(request, dir, jobId) {
     {},
   );
   for (const [repo, s] of Object.entries(review.targets)) {
-    if ((await snapshot(s.path)).fingerprint !== s.target)
+    if (!(await reviewTargetMatches(s)))
       throw new Error(
         "Reviewed artifacts changed; request a new review attempt.",
       );

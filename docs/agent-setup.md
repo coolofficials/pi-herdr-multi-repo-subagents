@@ -306,7 +306,6 @@ Reviewer/Oracle은 `repo_artifact`에 `id`만 전달해도 할당된 작업의 �
 
 시작 요청은 한 번만 보냅니다. 실패 시 pane과 기록을 보존하며 `startup-error.json`의 `stage`로 준비 대기와 실행 단계 오류를 구분합니다. `shell-ready.json`은 셸 관찰 근거이며 Pi 준비 완료나 작업 실행 성공 기록이 아닙니다. 오류 후 시작 요청 자동 재전송·Enter/Ctrl+C 주입·pane 종료·기존 실패 작업 자동 복구는 하지 않습니다.
 
-
 ## 보고서·진행 상태 복구 (v0.10.5)
 
 - 실패한 리뷰 제출은 draft를 보존하지만 승인은 주지 않습니다. Orchestrator가 외부 진행 문서를 읽고 `repo_task_document action=reconcile`로 분류한 뒤, 해당 Reviewer의 직접 부모가 `repo_agent_repair {id}` 또는 기존 `repo_request_review`로 같은 job의 저장을 재개합니다. 코드·계약·열람 범위 조건은 다시 확인합니다. 이 경로는 새 pane/모델 호출/리뷰 횟수를 만들지 않습니다.
@@ -318,3 +317,16 @@ Reviewer/Oracle은 `repo_artifact`에 `id`만 전달해도 할당된 작업의 �
 - 사용자 진행 세션에는 reload/재시작을 강제하지 않습니다. 이전 snapshot을 유지하고 package source를 새 버전으로 변경한 후 새 메인 Pi에서 사용하는 것이 일관된 적용 방법입니다. 기존 세션의 결과 파일을 수동 수정해 승인하지 않습니다. 오래된 제출에는 새 draft가 없을 수 있어 자동 복구를 보장하지 않습니다.
 
 - package entry는 CLI에 명시한 이 패키지 bridge에 위임하여, profile을 갱신한 뒤 구 메인이 자식을 열어도 두 버전의 hook/tool을 함께 등록하지 않습니다. 기존 가족은 자신이 명시한 bridge로 계속 동작하며 새 메인에서 새 설치본을 사용합니다. 자식/부모를 새 버전으로 자동 이동하거나 기존 상태를 승인하지 않습니다.
+
+## 프로세스 재시작 후 workflow 복구 (v0.10.6)
+
+Pi를 같은 대화로 다시 실행하면 이전 메인·알려진 자식이 모두 종료된 후 기존 workflow 기록을 자동 연결합니다. 실행 가족은 새로 만들고 task/project ID·baseline·검토 횟수/한도·근거는 유지합니다. 대화가 다르면 `/repo-agents history` 또는 `repo_workflow history`로 정확한 run ID를 확인하고 `/repo-agents restore <run-id>`로 선택합니다. 살아 있거나 상태가 불명확한 프로세스, 불확실한 launch, 이미 작업이 있는 새 메인에는 복구하지 않습니다. 복구가 막힌 동안 새 작업을 만들어 검토 한도를 초기화하지 않습니다.
+
+- `/repo-agents help`: 실제 지원 명령 목록.
+- `/repo-agents workflow` 또는 `repo_workflow status`: 현재 실행과 workflow 연결 상태.
+- `repo_workflow evidence`, task ID와 offset: 이전 자식의 compact 보고 한 건씩 열람. 새 Task Lead도 자기 작업의 근거를 읽을 수 있습니다.
+- `repo_workflow repair_report` 또는 `/repo-agents repair-report task <task-id>` / `oracle <project-id>`: 마지막 검토의 같은 job/slot 보고 복구. 진행 문서의 외부 변경은 먼저 읽고 `repo_task_document reconcile`로 분류합니다.
+
+거절된 구버전 보고는 정확한 원본 tool call·거절 결과·요청 경계가 남아 있는 경우에만 추출합니다. 실제 코드/요구사항/의존 범위/읽기 근거를 재검증하며, 한도 연장·새 리뷰·PASS 추정은 하지 않습니다. 원본이 없거나 근거가 부족하면 구체적인 차단 사유를 유지합니다. 설치 파일 해시가 같다는 사실만으로 승인하지 않습니다. `recover`는 죽은 자식 정리, `fresh`/`continue`는 같은 프로세스의 대화 인계이며 `restore`와 구별합니다. 회사 간/컴퓨터 간 import나 pre-hierarchy schema migration은 지원하지 않습니다. 실행 중 사용자 세션을 종료하거나 업무 workflow를 복구했다는 주장을 설치 확인만으로 하지 않습니다.
+
+보고 복구에서 읽기 근거 부족이 확인되면, 자기 task를 맡은 새 Task Lead가 `repo_workflow resume_review` (`kind: task`, 기존 `id`)로 같은 검토 slot을 이어갈 수 있습니다. Oracle은 Orchestrator가 `kind: oracle`로 이어갑니다. `/repo-agents resume-review <task|oracle> <ID>`도 동일합니다. 기존 Reviewer 종료·현재 코드/계약 동일성을 확인하며, 한 slot당 새 프로세스 continuation은 1회로 제한합니다. job ID·검토 횟수/한도는 유지하고 기존 판정 초안은 복사하지 않습니다. 새 Reviewer가 부족한 읽기 근거를 확인하고 독립 판정을 제출해야 합니다. 코드/계약 변경이나 연속 재시도에는 적용하지 않습니다.

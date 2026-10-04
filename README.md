@@ -721,3 +721,82 @@ package. Updating the profile therefore does not load two bridge versions in an
 old parent's newly launched child or an explicitly launched main. Existing families keep their explicit bridge;
 new main processes use the selected package version. This is version isolation,
 not automatic migration of prior state or restarted user sessions.
+
+## Workflow recovery after process restart (v0.10.6)
+
+Execution families remain process-owned. Workflow records now have a separate
+`workScope` binding: restarting the **same Pi conversation** restores its retained
+schema-2 task/project records after the old main and all known descendants are
+confirmed dead. Task IDs, requirements, decisions, baselines, review attempts,
+limits, no-progress guards, input receipts and evidence remain in their original
+storage directory. The new main has an empty child registry and launches fresh
+scoped children only when needed. It never adopts a live, detached or unknown
+process. If an earlier restart left an empty run, a unique historical workflow
+for that exact conversation can still be found; ambiguous candidates require an
+explicit selection. Pending recovery blocks replacement work and new delegation.
+
+A new conversation can select an exact run explicitly:
+
+```text
+/repo-agents help
+/repo-agents history
+/repo-agents restore <run-id>
+/repo-agents workflow
+/repo-agents repair-report task <task-id>
+/repo-agents repair-report oracle <project-id>
+```
+
+`repo_workflow` exposes `history`, `status`, `restore`, `evidence` and
+`repair_report` directly to the Orchestrator. `evidence` returns one retained
+compact report per page (`offset`, `nextOffset`), allowing a new Lead to reuse
+implementation/check results without reading raw transcripts or repeating work.
+Leads can only inspect status and their assigned task's evidence/review repair;
+they cannot restore other workflows or reset budgets. Only an empty main may
+restore; existing workflows cannot be merged or replaced. Restoration has a
+durable journal and is idempotent. Same-process `fresh`/`continue` handoffs retain
+the durable binding as well as their own execution family. `recover` still only
+retires confirmed dead children; it does not load a workflow or grant approval.
+
+A failed review draft can be repaired on its **original job and review slot**.
+For older versions that discarded drafts, the host can recover only the final
+structured `repo_agent_report` tool call from that job's own final session branch,
+paired with a recorded `PROGRESS_INPUT_PENDING` rejection and an unambiguous
+request boundary. It records the transcript hash, request hash, entry and call
+IDs. Further tool work, invalidated drafts, ambiguous requests, missing original
+submissions and arbitrary failures are rejected. This internal extraction does
+not expose transcripts to managers. Code, current contracts, progress/input
+classification, dependency scope and inspection coverage must still pass normal
+validation. Legacy fingerprint formats can be matched only by the complete file
+set, byte hashes and modes; opaque or changed candidates cannot inherit approval.
+Recovery never infers PASS from prose, installer hashes or a handoff note, creates
+another review attempt, or extends a review limit.
+
+This is local recovery in the same root/profile/storage, not cross-machine import
+or support for pre-hierarchy schemas. Unregistered background commands remain
+outside process ownership; inspect them separately. Restore does not publish
+artifacts or imply Oracle/release approval. Live processes and uncertain launches
+must settle or be explicitly inspected/recovered before restoration.
+
+`scripts/test-workflow-restart-live.mjs NEW_TEST_DIRECTORY` runs in a dedicated
+Herdr test pane. It starts two real Pi RPC processes, resumes one test-owned Pi
+session, verifies the new execution identity/durable binding, repairs a synthetic
+failed report without another attempt, and checks manager tools remain restricted.
+No model requests are made: this is a runtime plumbing test, not independent
+review quality or a complete model-backed hierarchy test. Pi defers transcript
+persistence before its first assistant answer, so this fixture explicitly saves
+its own header/entries for the no-model restart. Use only a disposable test
+root/profile; do not run against ongoing work.
+
+When report recovery exposes missing inspection receipts, `repo_workflow
+resume_review` (`kind: task|oracle`, existing `id`) or `/repo-agents resume-review
+<task|oracle> <ID>` can continue that unfinished review with **one** new independent
+Reviewer/Oracle process. A task's assigned Lead owns this action (Orchestrator for
+direct tasks or Oracle). The old reviewer must be confirmed dead. The original
+job ID, attempt number, limit, targets, requirements and project/task approvals
+remain unchanged; a provenance link retains the old agent/report. Only existing
+read/dependency receipts are carried forward, and the new process must inspect
+remaining coverage and independently submit its own verdict. No PASS draft is
+copied. Changed code/contracts, accepted reports, live reviewers and repeat
+continuations are refused. Uncertain launches retain their record for inspection;
+this is bounded completion of an existing unfinished slot, not an unbounded
+re-review loop or a review-budget extension.

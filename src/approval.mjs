@@ -4,7 +4,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { readJSON, writeJSON } from "./storage.mjs";
 import { scopedPath } from "./access.mjs";
-import { snapshot } from "./workflow.mjs";
+import { snapshot, reviewTargetMatches } from "./workflow.mjs";
 
 const digest = (data) => createHash("sha256").update(data).digest("hex");
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -174,6 +174,23 @@ export async function taskApprovalScope(request, dir, job) {
         writable: true,
         configurable: true,
       });
+    }
+  }
+  // Normalize a legacy whole-repository digest only after byte-for-byte proof
+  // against that review's retained target, preserving its original provenance.
+  for (const [repo, dependency] of Object.entries(scope.repositories)) {
+    const target = request.contract.review.targets[repo];
+    if (
+      target &&
+      dependency.path === target.path &&
+      dependency.fingerprint === target.target &&
+      (await reviewTargetMatches(target))
+    ) {
+      const current = await snapshot(target.path);
+      if (current.fingerprint !== dependency.fingerprint) {
+        dependency.legacyFingerprint = dependency.fingerprint;
+        dependency.fingerprint = current.fingerprint;
+      }
     }
   }
   if (!(await approvalScopeValid(scope)))

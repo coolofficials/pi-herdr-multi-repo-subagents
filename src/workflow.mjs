@@ -92,6 +92,44 @@ export async function snapshot(repo) {
     entries,
   };
 }
+// A legacy snapshot may encode a different fingerprint scheme. The unchanged
+// candidate can still be proven by the complete file set, byte hashes and modes.
+export async function reviewTargetMatches(target) {
+  const current = await snapshot(target.path);
+  if (current.fingerprint === target.target) return true;
+  const retained = await readJSON(target.snapshot);
+  if (retained?.fingerprint !== target.target || !retained.entries)
+    return false;
+  if (
+    retained.schema !== 2 ||
+    digest(
+      JSON.stringify(
+        Object.keys(retained.entries)
+          .sort()
+          .map((file) => {
+            const e = retained.entries[file];
+            return [file, e.hash, e.mode, e.size, e.kind, e.content];
+          }),
+      ),
+    ) !== retained.fingerprint
+  )
+    return false;
+  const actual = Object.keys(current.entries).sort(),
+    expected = Object.keys(retained.entries).sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) return false;
+  return expected.every((file) => {
+    const entry = retained.entries[file],
+      observed = current.entries[file];
+    return (
+      (!entry.kind || entry.kind === "file") &&
+      (!entry.content || entry.content === "inline") &&
+      typeof entry.data === "string" &&
+      digest(Buffer.from(entry.data, "base64")) === entry.hash &&
+      entry.hash === observed.hash &&
+      entry.mode === observed.mode
+    );
+  });
+}
 export async function reviewChanges(
   request,
   repoPath,
@@ -115,7 +153,14 @@ export async function reviewChanges(
     );
   const base = await readJSON(baselineFile);
   const current = await snapshot(repoPath);
-  if (current.fingerprint !== request.contract.review.target)
+  if (
+    current.fingerprint !== request.contract.review.target &&
+    !(await reviewTargetMatches({
+      path: repoPath,
+      target: request.contract.review.target,
+      snapshot: request.contract.review.snapshot,
+    }))
+  )
     throw new Error(
       "Code changed since review began. Stop and ask the parent for a new review attempt.",
     );
@@ -130,7 +175,7 @@ export async function reviewChanges(
     .sort();
   if (!file)
     return {
-      fingerprint: current.fingerprint,
+      fingerprint: request.contract.review.target,
       changed: changed.slice(offset, offset + 100),
       nextOffset: offset + 100 < changed.length ? offset + 100 : null,
       total: changed.length,
@@ -151,7 +196,7 @@ export async function reviewChanges(
       : "[absent]";
   return {
     file,
-    fingerprint: current.fingerprint,
+    fingerprint: request.contract.review.target,
     before: fragment(before),
     after: fragment(after),
     beforeMode: before?.mode,

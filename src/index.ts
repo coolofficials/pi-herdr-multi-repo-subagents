@@ -223,7 +223,16 @@ export default function extension(pi: ExtensionAPI) {
     }
     if (!child.isChild() && snapshot.repositories.length)
       await showCoordinator(pi, ctx, client);
-    return repositoryContext(snapshot);
+    const current = await client.list();
+    const recovery = client.lifecycle?.status().workflowRecovery;
+    return [
+      repositoryContext(current),
+      recovery
+        ? `Workflow recovery state (data): ${JSON.stringify({ status: recovery.status, workflowId: recovery.workflowId, runId: recovery.runId, reason: recovery.reason })}. Use repo_workflow status/history/restore or repair_report to continue the existing work and budget; never recreate tasks to bypass review.`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
   };
   const begin = async (_event: unknown, ctx: ExtensionContext) => {
     stop();
@@ -846,11 +855,71 @@ export default function extension(pi: ExtensionAPI) {
       },
     }),
   );
+  pi.registerTool(
+    defineTool({
+      name: "repo_workflow",
+      label: "Workflow recovery",
+      description:
+        "Inspect retained workflows and restore an exact old run after all its processes are confirmed dead. Preserves task/project IDs, baselines, decisions, review slots and evidence; never adopts children or resets review budgets. history/status/evidence are read-only. evidence returns one retained compact report per page for the assigned task, including old Implementer/Reviewer/Lead outcomes without adopting their processes. restore requires an empty main and an exact runId. repair_report validates the latest existing task/oracle job, including a narrowly proven legacy failed report tool call; never imports prose as PASS. Leads may only status/repair_report for their assigned task. resume_review continues a confirmed-dead unfinished review with one new independent process on the same job/slot and unchanged candidate, retaining receipts but requiring its own verdict. No new attempt or extra implementation is implied; changed contracts/code and repeat continuations are blocked. Use this tool when resumed work lists are empty; do not ask users for nonexistent import commands.",
+      parameters: Type.Object({
+        action: Type.Union([
+          Type.Literal("history"),
+          Type.Literal("status"),
+          Type.Literal("restore"),
+          Type.Literal("repair_report"),
+          Type.Literal("resume_review"),
+          Type.Literal("evidence"),
+        ]),
+        runId: Type.Optional(Type.String()),
+        kind: Type.Optional(
+          Type.Union([Type.Literal("task"), Type.Literal("oracle")]),
+        ),
+        id: Type.Optional(Type.String()),
+        offset: Type.Optional(Type.Integer({ minimum: 0 })),
+      }),
+      async execute(_call, params, _signal, _update, ctx) {
+        return result(await controller(ctx).workflow(params));
+      },
+    }),
+  );
   pi.registerCommand("repo-agents", {
     description:
       "Inspect agents, open board, or configure role models with models",
     handler: async (args, ctx) => {
       const [action, ...words] = args.trim().split(/\s+/);
+      if (action === "help") {
+        ctx.ui.notify(
+          "/repo-agents [roster] | board | models | history | workflow | restore <run-id> | repair-report <task|oracle> <ID> | resume-review <task|oracle> <ID> | recover <agent-id|repo> | fresh <handoff> | continue <handoff> | extend-review <task|oracle> <ID>. restore resumes records only after all old processes are dead; recover only retires dead children; fresh/continue are same-process handoffs.",
+          "info",
+        );
+        return;
+      }
+      if (
+        ["workflow", "restore", "repair-report", "resume-review"].includes(
+          action,
+        )
+      ) {
+        const data = await controller(ctx).workflow(
+          action === "workflow"
+            ? { action: "status" }
+            : action === "restore"
+              ? { action: "restore", runId: words[0] }
+              : {
+                  action:
+                    action === "resume-review"
+                      ? "resume_review"
+                      : "repair_report",
+                  kind: words[0],
+                  id: words[1],
+                },
+        );
+        pi.sendMessage({
+          customType: "repo-workflow-recovery",
+          content: JSON.stringify(data),
+          display: true,
+        });
+        return;
+      }
       if (child.isChild()) {
         if (
           child.state().role === "task_lead" &&
@@ -965,7 +1034,7 @@ export default function extension(pi: ExtensionAPI) {
         const snapshot = {
           repositories: roster.repositories.slice(0, 50),
           agents: roster.agents.slice(0, 50),
-          work: (await listWork(client.scope)).slice(-50),
+          work: (await listWork(client.workScope)).slice(-50),
         };
         if (summary.length > 8000) {
           ctx.ui.notify(

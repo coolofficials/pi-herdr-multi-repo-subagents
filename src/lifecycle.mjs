@@ -118,7 +118,7 @@ export class Lifecycle {
     if (!state) return { status: "unclaimed" };
     return { ...state, processStatus: liveness(state.instance, this.inspect) };
   }
-  connect({ sessionId, sessionFile, handoff = false }) {
+  connect({ sessionId, sessionFile, handoff = false, workScope = this.scope }) {
     return this.transaction(() => {
       const old = this.read();
       const ours = old?.instance?.token === this.identity.token;
@@ -144,7 +144,12 @@ export class Lifecycle {
         root: this.root,
         scope: this.scope,
         runId: this.identity.token,
-        workflowId: this.identity.token,
+        workflowId: ours
+          ? (old.workflowId ?? this.identity.token)
+          : this.identity.token,
+        workScope: ours ? (old.workScope ?? workScope) : workScope,
+        role: this.key === this.root ? "orchestrator" : "task_lead",
+        workflowRecovery: ours ? old.workflowRecovery : undefined,
         epoch:
           ours && old.sessionId === sessionId && old.status === "active"
             ? old.epoch
@@ -166,6 +171,20 @@ export class Lifecycle {
           ours && (old.sessionId !== sessionId || old.status !== "active"),
         ),
       };
+    });
+  }
+  bindWorkflow(workScope, recovery) {
+    return this.transaction(() => {
+      const state = this.assertOwned();
+      const updated = {
+        ...state,
+        workScope,
+        workflowId: path.basename(workScope),
+        workflowRecovery: recovery,
+      };
+      this.save(updated);
+      this.lease = updated;
+      return updated;
     });
   }
   assertOwned() {
