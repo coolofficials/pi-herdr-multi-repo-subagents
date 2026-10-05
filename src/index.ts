@@ -36,7 +36,7 @@ import {
 } from "./hierarchy.mjs";
 import { repositoryContext } from "./discovery.mjs";
 import childBridge from "./child.ts";
-import { handoffs } from "./lifecycle.mjs";
+import { handoffs, liveness } from "./lifecycle.mjs";
 
 export default function extension(pi: ExtensionAPI) {
   const child = childBridge(pi);
@@ -124,6 +124,18 @@ export default function extension(pi: ExtensionAPI) {
         if (!(error instanceof CoordinationBusy)) throw error;
       }
       if (!client.delegation) {
+        const board = await readJSON(path.join(client.scope, "board.json"));
+        const runtime = await readJSON(
+          path.join(client.scope, "board-runtime.json"),
+        );
+        if (
+          board?.status === "open" &&
+          board.owner === client.identity.token &&
+          runtime?.pane === board.pane &&
+          runtime.terminal === board.terminal &&
+          liveness(runtime.instance) === "alive"
+        )
+          ctx.ui.setStatus("repo-board", undefined);
         const requests = (
           await fs
             .readdir(path.join(client.scope, "board-requests"))
@@ -281,6 +293,7 @@ export default function extension(pi: ExtensionAPI) {
         ) {
           try {
             await ensureBoard(controller(ctx));
+            ctx.ui.setStatus("repo-board", undefined);
           } catch (error) {
             ctx.ui.setStatus(
               "repo-board",
@@ -889,7 +902,7 @@ export default function extension(pi: ExtensionAPI) {
       const [action, ...words] = args.trim().split(/\s+/);
       if (action === "help") {
         ctx.ui.notify(
-          "/repo-agents [roster] | board | models | history | workflow | restore <run-id> | repair-report <task|oracle> <ID> | resume-review <task|oracle> <ID> | recover <agent-id|repo> | fresh <handoff> | continue <handoff> | extend-review <task|oracle> <ID>. restore resumes records only after all old processes are dead; recover only retires dead children; fresh/continue are same-process handoffs.",
+          "/repo-agents [roster] | board [reclaim <pane-id>] | models | history | workflow | restore <run-id> | repair-report <task|oracle> <ID> | resume-review <task|oracle> <ID> | recover <agent-id|repo> | fresh <handoff> | continue <handoff> | extend-review <task|oracle> <ID>. restore resumes records only after all old processes are dead; recover only retires dead children; fresh/continue are same-process handoffs.",
           "info",
         );
         return;
@@ -945,7 +958,10 @@ export default function extension(pi: ExtensionAPI) {
       if (action === "board") {
         const client = controller(ctx);
         await client.requireOwnership();
-        const board = await ensureBoard(client, true);
+        if (words.length && (words.length !== 2 || words[0] !== "reclaim"))
+          throw new Error("Use /repo-agents board [reclaim <pane-id>].");
+        const board = await ensureBoard(client, true, words[1]);
+        ctx.ui.setStatus("repo-board", undefined);
         ctx.ui.notify(board?.message ?? "Board opened.", "info");
         return;
       }

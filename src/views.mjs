@@ -7,6 +7,8 @@ import { readJSON, writeJSON } from "./storage.mjs";
 import { withOperationLock } from "./coordination-lock.mjs";
 import { liveness } from "./lifecycle.mjs";
 import { executionState } from "./execution.mjs";
+import { resolveBoardSlot, socketIdentity } from "./board-slot.mjs";
+import { waitForLaunchShell } from "./launch-readiness.mjs";
 const exec = promisify(execFile);
 const quote = (s) => "'" + s.replaceAll("'", "'\\''") + "'";
 const viewPath = (client, bundle) =>
@@ -161,7 +163,8 @@ export async function shellAvailable(client, record) {
   if (
     !info?.shell_pid ||
     info.foreground_process_group_id !== info.shell_pid ||
-    !info.foreground_processes?.every((p) => p.pid === info.shell_pid)
+    !info.foreground_processes?.length ||
+    !info.foreground_processes.every((p) => p.pid === info.shell_pid)
   )
     return false;
   // A shell prompt alone does not exclude a user-started background process.
@@ -312,7 +315,7 @@ export async function maintainViews(
       await writeJSON(file, { ...view, closed: true });
   }
 }
-async function previousBoard(client) {
+async function previousBoard(client, reclaimPane) {
   const scopes = await fs.readdir(path.dirname(client.scope), {
     withFileTypes: true,
   });
@@ -325,6 +328,8 @@ async function previousBoard(client) {
     const board = await readJSON(path.join(scope, "board.json"));
     if (
       !board?.pane ||
+      board.status === "reassigned" ||
+      (reclaimPane && board.pane !== reclaimPane) ||
       parent?.root !== client.root ||
       parent.pane !== client.env.HERDR_PANE_ID ||
       parent.socket !== client.env.HERDR_SOCKET_PATH
@@ -350,35 +355,39 @@ async function previousBoard(client) {
       );
     const pane = panes.find((p) => p.pane_id === candidate.board.pane);
     if (!pane) continue;
-    if (liveness(candidate.parent.instance) !== "dead")
+    const slot = await resolveBoardSlot(client, candidate, reclaimPane);
+    if (!(await shellAvailable(client, slot.board)))
       throw Error(
-        `Previous board ${pane.pane_id} belongs to a live or unknown owner. No duplicate board created.`,
+        `Previous board pane ${pane.pane_id} has a foreground or background process. Inspect it before reopening; no duplicate pane created.`,
       );
-    if (!(await shellAvailable(client, candidate.board)))
-      throw Error(
-        `Previous board pane ${pane.pane_id} is still occupied. Press q in an old board, or inspect that pane before reopening the board. No duplicate pane created.`,
-      );
-    return candidate;
+    return { ...candidate, board: slot.board, receipt: slot.receipt };
   }
 }
-export async function ensureBoard(client, reopen = false) {
+export async function ensureBoard(
+  client,
+  reopen = false,
+  reclaimPane = /** @type {string | undefined} */ (undefined),
+) {
   if (client.delegation) return;
   // A board slot belongs to a root and main pane, not to each conversation/process.
   return withOperationLock(
     path.join(path.dirname(client.scope), ".board-lock"),
-    () => openBoard(client, reopen),
+    () => openBoard(client, reopen, reclaimPane),
     { identity: client.identity },
   );
 }
-async function openBoard(client, reopen) {
+async function openBoard(client, reopen, reclaimPane) {
   if (client.delegation) return;
   const file = path.join(client.scope, "board.json"),
     old = await readJSON(file);
   if (old && !reopen) return;
-  let pane, identity;
+  let pane, identity, receipt;
+  if (reclaimPane && old?.pane && reclaimPane !== old.pane)
+    throw Error("Reclaim must target this main's recorded board pane.");
   if (!old) {
-    const prior = await previousBoard(client);
+    const prior = await previousBoard(client, reclaimPane);
     if (prior) {
+      receipt = prior.receipt;
       pane = prior.board.pane;
       identity = { tab: prior.board.tab, terminal: prior.board.terminal };
       await writeJSON(path.join(prior.scope, "board.json"), {
@@ -388,6 +397,10 @@ async function openBoard(client, reopen) {
       });
     }
   }
+  if (reclaimPane && !pane && !old?.pane)
+    throw Error(
+      "Reclaim must target a recorded board for this task root and main pane.",
+    );
   if (old && reopen) {
     const panes = (
       await client.call([
@@ -399,18 +412,29 @@ async function openBoard(client, reopen) {
     ).result?.panes;
     if (!Array.isArray(panes)) throw Error("Cannot confirm board topology.");
     const existing = panes.find((p) => p.pane_id === old.pane);
+    if (!existing && reclaimPane)
+      throw Error(
+        "The recorded reclaim pane no longer exists; no duplicate pane created.",
+      );
     if (existing) {
-      if (existing.tab_id !== old.tab || existing.terminal_id !== old.terminal)
-        throw Error(
-          "Board pane identity changed; no replacement pane created.",
-        );
-      if (!(await shellAvailable(client, old)))
+      const slot = await resolveBoardSlot(
+        client,
+        { scope: client.scope, parent: null, board: old },
+        reclaimPane,
+      );
+      if (slot.retained)
         return {
           status: "retained",
-          message: "Board or another process is still running in its pane.",
+          message: "This main's board is already running.",
+          pane: old.pane,
         };
+      if (!(await shellAvailable(client, slot.board)))
+        throw Error(
+          `Board pane ${old.pane} has a foreground or background process. Inspect it before reopening; no duplicate pane created.`,
+        );
+      receipt = slot.receipt;
       pane = old.pane;
-      identity = { tab: old.tab, terminal: old.terminal };
+      identity = { tab: slot.board.tab, terminal: slot.board.terminal };
     } else if (!old.pane)
       throw Error(
         "Board creation was uncertain. Inspect the layout before replacing it.",
@@ -437,12 +461,30 @@ async function openBoard(client, reopen) {
     const current = (await client.call(["pane", "get", pane])).result?.pane;
     identity = { tab: current?.tab_id, terminal: current?.terminal_id };
   }
+  const anchor = (await client.call(["pane", "get", client.env.HERDR_PANE_ID]))
+    .result?.pane;
+  const binding = {
+    anchorTerminal: anchor?.terminal_id,
+    socketIdentity: await socketIdentity(client.env.HERDR_SOCKET_PATH),
+  };
+  if (receipt)
+    await writeJSON(path.join(client.scope, "board-rebind.json"), receipt);
   await writeJSON(file, {
     status: "starting",
     pane,
     ...identity,
+    ...binding,
     owner: client.identity.token,
   });
+  const readyShell = await waitForLaunchShell(client, { pane, ...identity });
+  if (!(await shellAvailable(client, { pane, ...identity })))
+    throw Error(
+      "Board shell became occupied; no command submitted and no duplicate pane created.",
+    );
+  await writeJSON(
+    path.join(client.scope, "board-shell-ready.json"),
+    readyShell,
+  );
   const script = fileURLToPath(new URL("./board.mjs", import.meta.url));
   await fs.rm(path.join(client.scope, "board-error.json"), { force: true });
   await fs.rm(path.join(client.scope, "board-runtime.json"), { force: true });
@@ -480,6 +522,7 @@ async function openBoard(client, reopen) {
     status: "open",
     pane,
     ...identity,
+    ...binding,
     owner: client.identity.token,
   });
   return { status: "open", pane };

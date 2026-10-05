@@ -506,6 +506,24 @@ The generator refuses an existing project directory. It creates a metadata jj re
 
 `scripts/test-live.mjs` and `scripts/test-lifecycle-live.mjs` are historical v0.3/v0.4 harnesses, retained as references. Do not execute them against the current role contracts or ongoing work. The current entry point is `scripts/test-hierarchy-live.mjs`. Destructive lifecycle scenarios require a dedicated disposable fixture and test process identities; never target a user's working family.
 
+## Board slot recovery (v0.10.7)
+
+Herdr may restore the same pane IDs with new terminal IDs after a server restart.
+This is distinguished from an occupied pane. New boards record the main terminal
+and socket generation; if both terminals were recreated in a changed socket
+generation, the previous owner/board are confirmed dead, and the original two-pane
+right-hand layout and task-root shell remain, the slot can be rebound automatically.
+Foreground/background processes and uncertain ownership prevent submission.
+
+Older records lack generation evidence. After inspecting the recorded idle board
+shell, use `/repo-agents board reclaim <pane-id>` to authorize that exact slot.
+This does not create a split, move panes, stop processes, or change workflow state.
+It accepts only an existing board record for the same task root/main pane and
+checks its tab, right-hand layout, task cwd, old process identities, and shell.
+Rebindings are recorded in `board-rebind.json`. No arbitrary shell can be selected.
+Repeated board commands retain a confirmed running board. Successful startup or
+recovery clears the board error status; an uncertain launch is never resubmitted.
+
 ## Board lifecycle correction (v0.9.1)
 
 The board belongs to the main pane. A new main process in the same task root,
