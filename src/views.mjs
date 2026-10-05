@@ -360,7 +360,12 @@ async function previousBoard(client, reclaimPane) {
       throw Error(
         `Previous board pane ${pane.pane_id} has a foreground or background process. Inspect it before reopening; no duplicate pane created.`,
       );
-    return { ...candidate, board: slot.board, receipt: slot.receipt };
+    return {
+      ...candidate,
+      originalBoard: candidate.board,
+      board: slot.board,
+      receipt: slot.receipt,
+    };
   }
 }
 export async function ensureBoard(
@@ -391,7 +396,7 @@ async function openBoard(client, reopen, reclaimPane) {
       pane = prior.board.pane;
       identity = { tab: prior.board.tab, terminal: prior.board.terminal };
       await writeJSON(path.join(prior.scope, "board.json"), {
-        ...prior.board,
+        ...prior.originalBoard,
         status: "reassigned",
         reassignedTo: client.scope,
       });

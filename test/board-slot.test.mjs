@@ -139,6 +139,10 @@ test("explicit legacy reclaim rebinds one known idle slot without splitting", as
   );
   const stored = await readJSON(path.join(f.scope, "board.json"));
   assert.equal(stored.terminal, "new-terminal");
+  assert.equal(
+    (await readJSON(path.join(f.prior, "board.json"))).terminal,
+    "old-terminal",
+  );
   assert.equal(stored.anchorTerminal, "new-main");
   assert.ok(stored.socketIdentity);
   assert.equal(
@@ -279,5 +283,31 @@ test("reassigned historical records do not block their actual successor", async 
   });
   const result = await ensureBoard(f.client, true, "board");
   assert.equal(result.status, "open");
+  assert.equal(f.calls.filter((a) => a[1] === "run").length, 1);
+});
+
+test("an absent explicit reclaim pane never creates a replacement split", async (t) => {
+  const f = await fixture(t);
+  await writeJSON(path.join(f.scope, "board.json"), {
+    ...f.board,
+    owner: f.client.identity.token,
+  });
+  const call = f.client.call;
+  f.client.call = async (args) =>
+    args[1] === "list" ? { result: { panes: [f.anchor] } } : call(args);
+  await assert.rejects(
+    ensureBoard(f.client, true, "board"),
+    /no longer exists/,
+  );
+  assert.ok(f.calls.every((a) => !["run", "split"].includes(a[1])));
+});
+
+test("concurrent board recovery requests submit one launch only", async (t) => {
+  const f = await fixture(t);
+  const results = await Promise.all([
+    ensureBoard(f.client, true, "board"),
+    ensureBoard(f.client, true, "board"),
+  ]);
+  assert.deepEqual(results.map((r) => r.status).sort(), ["open", "retained"]);
   assert.equal(f.calls.filter((a) => a[1] === "run").length, 1);
 });
